@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: heart-diary-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://heartdiary:heartdiary_secret@db:5432/heartdiary
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./uploads:/app/uploads
+      - ./reports:/app/reports
+      - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - heart-diary-network
+
+  db:
+    image: postgres:15-alpine
+    container_name: heart-diary-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=heartdiary
+      - POSTGRES_PASSWORD=heartdiary_secret
+      - POSTGRES_DB=heartdiary
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U heartdiary -d heartdiary"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - heart-diary-network
+
+volumes:
+  postgres_data:
+
+networks:
+  heart-diary-network:
+    driver: bridge
