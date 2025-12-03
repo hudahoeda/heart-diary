@@ -10,16 +10,17 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Request, Form, HTTPException, Depends
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import re
 
 from ecg_processor import process_ecg_data
 
 # Import database models and connection from database package
 from database import (
-    Base, Report, ECGData, AccelerometerData, MarkerData, ReportHTML,
+    Base, Report, ECGData, AccelerometerData, HRData, MarkerData, ReportHTML,
     SessionLocal, get_db
 )
 from database.connection import engine
@@ -98,7 +99,7 @@ def load_reports_db() -> dict:
 
 
 def save_report_to_db(report_data: dict, ecg_content: str, acc_content: str = None, 
-                      marker_content: str = None, markers_list: list = None):
+                      marker_content: str = None, hr_content: str = None, markers_list: list = None):
     """
     Save a report to database with separate tables for each data type.
     """
@@ -119,6 +120,7 @@ def save_report_to_db(report_data: dict, ecg_content: str, acc_content: str = No
             ecg_filename=report_data.get("ecg_filename", ""),
             has_acc=acc_content is not None,
             has_marker=marker_content is not None,
+            has_hr=hr_content is not None,
             created_at=datetime.utcnow()
         )
         db.add(report)
@@ -145,7 +147,16 @@ def save_report_to_db(report_data: dict, ecg_content: str, acc_content: str = No
             )
             db.add(acc_record)
         
-        # 4. Create Marker data records (if provided)
+        # 4. Create HR data record (if provided)
+        if hr_content:
+            hr_record = HRData(
+                report_id=report.id,
+                filename=report_data.get("hr_filename"),
+                content=hr_content
+            )
+            db.add(hr_record)
+        
+        # 5. Create Marker data records (if provided)
         if markers_list:
             for i, marker in enumerate(markers_list):
                 marker_record = MarkerData(
@@ -161,7 +172,7 @@ def save_report_to_db(report_data: dict, ecg_content: str, acc_content: str = No
                 )
                 db.add(marker_record)
         
-        # 5. Create Report HTML record
+        # 6. Create Report HTML record
         if report_data.get("report_html"):
             html_record = ReportHTML(
                 report_id=report.id,
@@ -240,6 +251,7 @@ async def upload_files(
     ecg_file: UploadFile = File(...),
     acc_file: Optional[UploadFile] = File(None),
     marker_file: Optional[UploadFile] = File(None),
+    hr_file: Optional[UploadFile] = File(None),
     notes: str = Form(""),
     username: str = Depends(verify_credentials)
 ):
@@ -258,11 +270,16 @@ async def upload_files(
         if marker_file and marker_file.filename:
             marker_content = (await marker_file.read()).decode('utf-8')
         
+        hr_content = None
+        if hr_file and hr_file.filename:
+            hr_content = (await hr_file.read()).decode('utf-8')
+        
         # Process the data using content strings (no file I/O)
         result = process_ecg_data(
             ecg_content,
             marker_content,
             acc_content,
+            hr_content,
             report_id
         )
         
@@ -281,6 +298,7 @@ async def upload_files(
                 "notes": notes,
                 "ecg_filename": ecg_file.filename,
                 "acc_filename": acc_file.filename if acc_file and acc_file.filename else None,
+                "hr_filename": hr_file.filename if hr_file and hr_file.filename else None,
                 "sampling_rate": result.get("sampling_rate"),
                 "sample_count": result.get("sample_count"),
                 "motion_stats": result.get("motion_stats", {}),
@@ -294,6 +312,7 @@ async def upload_files(
                 ecg_content=ecg_content,
                 acc_content=acc_content,
                 marker_content=marker_content,
+                hr_content=hr_content,
                 markers_list=result.get("markers", [])
             )
             
@@ -320,6 +339,317 @@ async def delete_report(report_id: str, username: str = Depends(verify_credentia
             raise HTTPException(status_code=404, detail="Report not found")
     finally:
         db.close()
+
+
+@app.post("/report/{report_id}/recalculate")
+async def recalculate_report(report_id: str, username: str = Depends(verify_credentials)):
+    """
+    Recalculate a report using stored raw data from the database.
+    This regenerates the HTML report with any algorithm updates.
+    """
+    db = SessionLocal()
+    try:
+        # 1. Get the report and related data
+        report = db.query(Report).filter(Report.id == report_id).first()
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found")
+        
+        # 2. Get ECG data (required)
+        ecg_data = db.query(ECGData).filter(ECGData.report_id == report_id).first()
+        if not ecg_data:
+            raise HTTPException(status_code=404, detail="ECG data not found for this report")
+        
+        ecg_content = ecg_data.content
+        
+        # 3. Get optional data
+        acc_content = None
+        acc_data = db.query(AccelerometerData).filter(AccelerometerData.report_id == report_id).first()
+        if acc_data:
+            acc_content = acc_data.content
+        
+        hr_content = None
+        hr_data = db.query(HRData).filter(HRData.report_id == report_id).first()
+        if hr_data:
+            hr_content = hr_data.content
+        
+        marker_content = None
+        marker_data = db.query(MarkerData).filter(MarkerData.report_id == report_id).first()
+        if marker_data and marker_data.raw_content:
+            marker_content = marker_data.raw_content
+        
+        # 4. Reprocess the data
+        result = process_ecg_data(
+            ecg_content,
+            marker_content,
+            acc_content,
+            hr_content,
+            report_id
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Recalculation failed"))
+        
+        # 5. Update the report record with new stats
+        report.duration_min = result.get("duration_min", report.duration_min)
+        report.mean_hr = result.get("mean_hr", report.mean_hr)
+        report.max_hr = result.get("max_hr", report.max_hr)
+        report.min_hr = result.get("min_hr", report.min_hr)
+        report.ectopic_burden = result.get("ectopic_burden", report.ectopic_burden)
+        report.sdnn = result.get("sdnn", report.sdnn)
+        report.pnn50 = result.get("pnn50", report.pnn50)
+        
+        # 6. Update the HTML report
+        report_html_record = db.query(ReportHTML).filter(ReportHTML.report_id == report_id).first()
+        if report_html_record:
+            report_html_record.html_content = result.get("report_html", report_html_record.html_content)
+            report_html_record.baseline_plot_base64 = result.get("baseline_plot_base64", report_html_record.baseline_plot_base64)
+            report_html_record.generated_at = datetime.utcnow()
+        elif result.get("report_html"):
+            # Create new HTML record if it doesn't exist
+            new_html_record = ReportHTML(
+                report_id=report_id,
+                html_content=result["report_html"],
+                baseline_plot_base64=result.get("baseline_plot_base64")
+            )
+            db.add(new_html_record)
+        
+        # 7. Update marker records with new pattern detection
+        if result.get("markers"):
+            # Delete old markers and add new ones
+            db.query(MarkerData).filter(MarkerData.report_id == report_id).delete()
+            for i, marker in enumerate(result["markers"]):
+                marker_record = MarkerData(
+                    report_id=report_id,
+                    marker_time=datetime.fromisoformat(marker["marker_time"]) if marker.get("marker_time") else None,
+                    marker_label=marker.get("marker_label"),
+                    sample_index=marker.get("sample_index"),
+                    detected_pattern=marker.get("detected_pattern"),
+                    pattern_severity=marker.get("pattern_severity", 0),
+                    hr_at_marker=marker.get("hr_at_marker"),
+                    ecg_plot_base64=marker.get("ecg_plot_base64"),
+                    raw_content=marker_content if i == 0 else None
+                )
+                db.add(marker_record)
+        
+        db.commit()
+        
+        return RedirectResponse(url=f"/report/{report_id}", status_code=303)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+def match_polar_files(files: list) -> list:
+    """
+    Match Polar files into groups based on device ID and timestamp.
+    Returns a list of dicts with matched ECG, HR, ACC, Marker files.
+    """
+    # Pattern: Polar_H10_<DEVICE_ID>_<DATE>_<TIME>_<TYPE>.txt
+    # Example: Polar_H10_EC4EFF22_20251203_135206_ECG.txt
+    pattern = r'Polar_H10_([A-F0-9]+)_(\d{8})_(\d{6})_([A-Z]+)\.txt'
+    
+    file_groups = {}  # key: (device_id, date, approx_time) -> files dict
+    
+    for file in files:
+        match = re.match(pattern, file.filename, re.IGNORECASE)
+        if match:
+            device_id, date_str, time_str, file_type = match.groups()
+            file_type = file_type.upper()
+            
+            # Group by device and date, using time window (within 30 seconds)
+            time_int = int(time_str)
+            
+            # Find or create group
+            group_key = None
+            for key in file_groups.keys():
+                if key[0] == device_id and key[1] == date_str:
+                    # Check if time is within 60 seconds
+                    existing_time = int(key[2])
+                    if abs(time_int - existing_time) <= 100:  # ~1 minute tolerance in HHMMSS
+                        group_key = key
+                        break
+            
+            if group_key is None:
+                group_key = (device_id, date_str, time_str)
+                file_groups[group_key] = {'ecg': None, 'hr': None, 'acc': None, 'marker': None}
+            
+            # Assign file to appropriate slot
+            if file_type == 'ECG':
+                file_groups[group_key]['ecg'] = file
+            elif file_type == 'HR':
+                file_groups[group_key]['hr'] = file
+            elif file_type == 'ACC':
+                file_groups[group_key]['acc'] = file
+            elif file_type == 'RR':
+                # RR files can be used if HR is not available (optional)
+                if file_groups[group_key]['hr'] is None:
+                    pass  # Could add RR support later
+    
+    # Also check for marker files (different pattern)
+    marker_pattern = r'MARKER_(\d{8})_(\d{6})\.txt'
+    for file in files:
+        match = re.match(marker_pattern, file.filename, re.IGNORECASE)
+        if match:
+            date_str, time_str = match.groups()
+            time_int = int(time_str)
+            
+            # Try to match with existing groups
+            for key, group in file_groups.items():
+                if key[1] == date_str:
+                    existing_time = int(key[2])
+                    if abs(time_int - existing_time) <= 1000:  # ~10 minute tolerance
+                        group['marker'] = file
+                        break
+    
+    # Filter to only groups with ECG files
+    valid_groups = [
+        {
+            'device_id': key[0],
+            'date': key[1],
+            'time': key[2],
+            **group
+        }
+        for key, group in file_groups.items()
+        if group['ecg'] is not None
+    ]
+    
+    return valid_groups
+
+
+@app.post("/bulk-upload")
+async def bulk_upload_files(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    notes: str = Form(""),
+    username: str = Depends(verify_credentials)
+):
+    """
+    Bulk upload multiple Polar files. Automatically matches ECG, HR, ACC, and Marker files.
+    Returns JSON with results for each processed session.
+    """
+    results = []
+    
+    # Match files into groups
+    file_groups = match_polar_files(files)
+    
+    if not file_groups:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "No valid ECG files found. Files must be named like: Polar_H10_DEVICEID_YYYYMMDD_HHMMSS_ECG.txt"}
+        )
+    
+    for group in file_groups:
+        report_id = str(uuid.uuid4())[:8]
+        session_time = f"{group['date']}_{group['time']}"
+        
+        try:
+            # Read file contents
+            ecg_content = (await group['ecg'].read()).decode('utf-8')
+            await group['ecg'].seek(0)  # Reset for potential re-read
+            
+            hr_content = None
+            if group['hr']:
+                hr_content = (await group['hr'].read()).decode('utf-8')
+                await group['hr'].seek(0)
+            
+            acc_content = None
+            if group['acc']:
+                acc_content = (await group['acc'].read()).decode('utf-8')
+                await group['acc'].seek(0)
+            
+            marker_content = None
+            if group['marker']:
+                marker_content = (await group['marker'].read()).decode('utf-8')
+                await group['marker'].seek(0)
+            
+            # Process the data
+            result = process_ecg_data(
+                ecg_content,
+                marker_content,
+                acc_content,
+                hr_content,
+                report_id
+            )
+            
+            if result.get("success"):
+                # Save report to database
+                report_entry = {
+                    "id": report_id,
+                    "date": result.get("date", datetime.now().isoformat()),
+                    "duration_min": result.get("duration_min", 0),
+                    "mean_hr": result.get("mean_hr", 0),
+                    "max_hr": result.get("max_hr", 0),
+                    "min_hr": result.get("min_hr", 0),
+                    "ectopic_burden": result.get("ectopic_burden", 0),
+                    "sdnn": result.get("sdnn", 0),
+                    "pnn50": result.get("pnn50", 0),
+                    "notes": notes,
+                    "ecg_filename": group['ecg'].filename,
+                    "acc_filename": group['acc'].filename if group['acc'] else None,
+                    "sampling_rate": result.get("sampling_rate"),
+                    "sample_count": result.get("sample_count"),
+                    "motion_stats": result.get("motion_stats", {}),
+                    "report_html": result.get("report_html"),
+                    "baseline_plot_base64": result.get("baseline_plot_base64")
+                }
+                
+                save_report_to_db(
+                    report_entry,
+                    ecg_content=ecg_content,
+                    acc_content=acc_content,
+                    marker_content=marker_content,
+                    markers_list=result.get("markers", [])
+                )
+                
+                results.append({
+                    "status": "success",
+                    "report_id": report_id,
+                    "session": session_time,
+                    "ecg_file": group['ecg'].filename,
+                    "hr_file": group['hr'].filename if group['hr'] else None,
+                    "acc_file": group['acc'].filename if group['acc'] else None,
+                    "marker_file": group['marker'].filename if group['marker'] else None,
+                    "mean_hr": result.get("mean_hr"),
+                    "duration_min": result.get("duration_min")
+                })
+            else:
+                results.append({
+                    "status": "error",
+                    "session": session_time,
+                    "ecg_file": group['ecg'].filename,
+                    "error": result.get("error", "Processing failed")
+                })
+                
+        except Exception as e:
+            results.append({
+                "status": "error",
+                "session": session_time,
+                "ecg_file": group['ecg'].filename if group.get('ecg') else "unknown",
+                "error": str(e)
+            })
+    
+    # If only one successful result, redirect to the report
+    successful = [r for r in results if r["status"] == "success"]
+    if len(successful) == 1:
+        return RedirectResponse(url=f"/report/{successful[0]['report_id']}", status_code=303)
+    
+    # Otherwise redirect to bulk results page
+    return templates.TemplateResponse("app.html", {
+        "request": request,
+        "active_tab": "bulk_results",
+        "page_title": "Bulk Upload Results",
+        "bulk_results": {
+            "total": len(results),
+            "successful": len(successful),
+            "failed": len(results) - len(successful),
+            "results": results
+        }
+    })
 
 
 @app.get("/api/reports")

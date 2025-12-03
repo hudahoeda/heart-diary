@@ -22,13 +22,14 @@ def run_migrations():
     """
     migrations_dir = get_migrations_dir()
     
-    # Determine which migration file to use
+    # Get all migration files sorted by version number
     if DATABASE_URL.startswith("sqlite"):
-        migration_file = migrations_dir / "001_initial_schema_sqlite.sql"
+        migration_files = sorted(migrations_dir.glob("*_sqlite.sql"))
     else:
-        migration_file = migrations_dir / "001_initial_schema.sql"
+        # Get PostgreSQL migrations (exclude SQLite files)
+        migration_files = sorted([f for f in migrations_dir.glob("*.sql") if "_sqlite" not in f.name])
     
-    if migration_file.exists():
+    for migration_file in migration_files:
         print(f"📦 Running migration: {migration_file.name}")
         with open(migration_file, "r") as f:
             sql_content = f.read()
@@ -42,14 +43,14 @@ def run_migrations():
                     try:
                         conn.execute(text(statement))
                     except Exception as e:
-                        # Skip errors for CREATE INDEX IF NOT EXISTS on SQLite
-                        if "already exists" not in str(e).lower():
+                        # Skip errors for CREATE INDEX IF NOT EXISTS or IF EXISTS clauses
+                        if "already exists" not in str(e).lower() and "does not exist" not in str(e).lower():
                             print(f"   ⚠️ Statement warning: {e}")
             conn.commit()
         
-        print("✅ Migration completed successfully")
-    else:
-        print(f"❌ Migration file not found: {migration_file}")
+        print(f"✅ Migration {migration_file.name} completed")
+    
+    print("✅ All migrations completed successfully")
 
 
 def create_tables():

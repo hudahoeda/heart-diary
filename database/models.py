@@ -30,11 +30,13 @@ class Report(Base):
     ecg_filename = Column(String(255), nullable=True)
     has_acc = Column(Boolean, default=False)
     has_marker = Column(Boolean, default=False)
+    has_hr = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     
     # Relationships to related data
     ecg_data = relationship("ECGData", back_populates="report", uselist=False, cascade="all, delete-orphan")
     acc_data = relationship("AccelerometerData", back_populates="report", uselist=False, cascade="all, delete-orphan")
+    hr_data = relationship("HRData", back_populates="report", uselist=False, cascade="all, delete-orphan")
     markers = relationship("MarkerData", back_populates="report", cascade="all, delete-orphan")
     report_html = relationship("ReportHTML", back_populates="report", uselist=False, cascade="all, delete-orphan")
 
@@ -75,6 +77,23 @@ class AccelerometerData(Base):
     
     # Relationship back to report
     report = relationship("Report", back_populates="acc_data")
+
+
+class HRData(Base):
+    """
+    Polar HR file data storage table.
+    Stores the original HR file content for recalculation.
+    """
+    __tablename__ = "hr_data"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    report_id = Column(String(8), ForeignKey("reports.id", ondelete="CASCADE"), nullable=False, unique=True)
+    filename = Column(String(255), nullable=True)
+    content = Column(Text, nullable=False)  # Raw CSV/TXT content
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationship back to report
+    report = relationship("Report", back_populates="hr_data")
 
 
 class MarkerData(Base):

@@ -67,6 +67,80 @@ def load_markers(marker_content, start_time, sampling_rate):
     return df_markers
 
 
+def load_hr_data(hr_content, ecg_start_time, sampling_rate, n_samples):
+    """
+    Load Polar HR file data and return HR series aligned to ECG samples.
+    Polar HR file format: Phone timestamp;HR [bpm];HRV [ms];Breathing interval [rpm];
+    """
+    if hr_content is None:
+        return None, None
+
+    print("💓 Loading Polar HR data...")
+    try:
+        df_hr = pd.read_csv(StringIO(hr_content), sep=';', engine='python')
+    except Exception as e:
+        print(f"   ⚠️ Could not load HR file: {e}")
+        return None, None
+
+    # Find timestamp and HR columns
+    ts_candidates = [c for c in df_hr.columns if 'phone' in c.lower()]
+    hr_candidates = [c for c in df_hr.columns if 'hr' in c.lower() and 'bpm' in c.lower()]
+    
+    if not ts_candidates or not hr_candidates:
+        print("   ⚠️ HR file missing required columns")
+        return None, None
+    
+    ts_col = ts_candidates[0]
+    hr_col = hr_candidates[0]
+
+    # Parse timestamps and HR values
+    df_hr['phone_dt'] = pd.to_datetime(df_hr[ts_col])
+    df_hr['hr_bpm'] = pd.to_numeric(df_hr[hr_col], errors='coerce')
+    
+    # Drop rows with missing HR
+    df_hr = df_hr.dropna(subset=['hr_bpm'])
+    
+    if len(df_hr) < 3:
+        print("   ⚠️ Not enough HR data points")
+        return None, None
+
+    # Convert ECG start time to naive if needed
+    if getattr(ecg_start_time, "tzinfo", None) is not None:
+        ecg_start_naive = ecg_start_time.tz_convert(None)
+    else:
+        ecg_start_naive = ecg_start_time
+
+    # Calculate time offset from ECG start
+    hr_time_s = (df_hr['phone_dt'] - ecg_start_naive).dt.total_seconds().values
+    hr_values = df_hr['hr_bpm'].values.astype(float)
+    
+    # Debug: Check time alignment
+    print(f"   📊 HR time range: {hr_time_s[0]:.1f}s to {hr_time_s[-1]:.1f}s from ECG start")
+
+    # Interpolate to ECG sample rate
+    ecg_time_s = np.arange(n_samples) / float(sampling_rate)
+    
+    # Check if there's any overlap
+    if hr_time_s[-1] < ecg_time_s[0] or hr_time_s[0] > ecg_time_s[-1]:
+        print(f"   ⚠️ No time overlap between HR and ECG data!")
+        return None, None
+    
+    hr_interp = np.interp(ecg_time_s, hr_time_s, hr_values)
+    
+    # Calculate stats from Polar HR
+    polar_stats = {
+        "mean_hr": int(np.mean(hr_values)),
+        "max_hr": int(np.max(hr_values)),
+        "min_hr": int(np.min(hr_values)),
+        "hr_samples": len(hr_values)
+    }
+    
+    print(f"   ✅ Polar HR Loaded: {len(hr_values)} samples | Avg: {polar_stats['mean_hr']} bpm | Range: {polar_stats['min_hr']}-{polar_stats['max_hr']} bpm")
+    print(f"   ✅ Interpolated to {len(hr_interp)} samples for ECG alignment")
+    
+    return hr_interp, polar_stats
+
+
 def load_acc_motion(acc_content, ecg_start_time, sampling_rate, n_samples):
     """
     Load accelerometer data from content string and produce motion flag.
@@ -182,16 +256,39 @@ def calculate_metrics_on_segment(segment, sampling_rate, description="Baseline")
     return metrics
 
 
-def calculate_global_stats(signals, rpeaks, sampling_rate):
+def calculate_global_stats(signals, rpeaks, sampling_rate, polar_hr_series=None, polar_hr_stats=None):
     """
     Calculate full comprehensive stats.
     Includes HR, HRV (SDNN, pNN50), and Frequency.
+    Uses Polar HR data when available (more accurate), falls back to ECG-derived.
     """
     # --- A. Heart Rate Stats ---
-    hr_series = signals["ECG_Rate"].astype(float)
-    mean_hr = int(hr_series.mean())
-    max_hr = int(hr_series.max())
-    min_hr = int(hr_series.min())
+    # Use Polar HR if available (more accurate), otherwise use ECG-derived
+    if polar_hr_stats is not None:
+        mean_hr = polar_hr_stats["mean_hr"]
+        max_hr = polar_hr_stats["max_hr"]
+        min_hr = polar_hr_stats["min_hr"]
+        hr_source = "Polar"
+        print(f"   📊 Using Polar HR data: {mean_hr} bpm (avg)")
+    else:
+        hr_source = "ECG-derived"
+        print(f"   📊 Using ECG-derived HR (no Polar HR file)")
+    
+    # ECG-derived HR for comparison and detailed analysis
+    ecg_hr_series = signals["ECG_Rate"].astype(float)
+    ecg_mean_hr = int(ecg_hr_series.mean())
+    ecg_max_hr = int(ecg_hr_series.max())
+    ecg_min_hr = int(ecg_hr_series.min())
+    
+    # If no Polar data, use ECG-derived
+    if polar_hr_stats is None:
+        mean_hr = ecg_mean_hr
+        max_hr = ecg_max_hr
+        min_hr = ecg_min_hr
+    
+    # Use Polar HR series for rolling stats if available, else ECG
+    hr_series = polar_hr_series if polar_hr_series is not None else ecg_hr_series
+    hr_series = pd.Series(hr_series) if not isinstance(hr_series, pd.Series) else hr_series
 
     window_1min = max(int(sampling_rate * 60), 5)
     rolling_hr = hr_series.rolling(window=window_1min).mean()
@@ -241,7 +338,11 @@ def calculate_global_stats(signals, rpeaks, sampling_rate):
         "sdnn": int(hrv_sdnn),
         "pnn50": int(pnn50),
         "pnn200": int(pnn200),
-        "hf": mean_hf
+        "hf": mean_hf,
+        "hr_source": hr_source,
+        "ecg_mean_hr": ecg_mean_hr,
+        "ecg_max_hr": ecg_max_hr,
+        "ecg_min_hr": ecg_min_hr
     }
 
 
@@ -496,14 +597,187 @@ def check_signal_quality(segment):
     return True
 
 
+def create_hr_trend_chart(hr_series, sr, start_time, duration_min, markers_data=None, 
+                          ectopic_indices=None, polar_hr_series=None, motion_flag=None):
+    """
+    Create an HR trend chart showing heart rate over time with clinical annotations.
+    
+    Args:
+        hr_series: ECG-derived HR (samples at ECG rate)
+        sr: Sampling rate
+        start_time: Recording start time
+        duration_min: Duration in minutes
+        markers_data: List of marker dicts with 'sample_index' and 'marker_label'
+        ectopic_indices: Array of sample indices where ectopic beats occurred
+        polar_hr_series: Polar HR data (if available) for comparison
+        motion_flag: Boolean array indicating motion periods
+    
+    Returns:
+        Base64 encoded PNG image
+    """
+    if hr_series is None or len(hr_series) == 0:
+        return ""
+    
+    print("📈 Generating HR trend chart...")
+    
+    # Downsample for plotting (1 point per second is enough)
+    downsample_factor = max(1, sr)
+    hr_downsampled = hr_series[::downsample_factor]
+    time_minutes = np.arange(len(hr_downsampled)) / 60.0  # Convert to minutes
+    
+    # Apply smoothing to ECG-derived HR to reduce noise from ectopic beats
+    # Use rolling median (more robust to outliers than mean)
+    window_size = min(15, len(hr_downsampled) // 4)  # ~15 second window
+    if window_size > 1:
+        hr_smoothed = pd.Series(hr_downsampled).rolling(window=window_size, center=True, min_periods=1).median().values
+    else:
+        hr_smoothed = hr_downsampled
+    
+    # Create figure with clinical styling
+    fig, ax = plt.subplots(figsize=(14, 5))
+    
+    # HR Zone backgrounds (clinical reference ranges)
+    ax.axhspan(0, 50, alpha=0.15, color='#2196F3', label='Bradycardia (<50)')
+    ax.axhspan(50, 60, alpha=0.08, color='#2196F3')
+    ax.axhspan(60, 100, alpha=0.08, color='#4CAF50', label='Normal (60-100)')
+    ax.axhspan(100, 150, alpha=0.08, color='#FF9800')
+    ax.axhspan(150, 250, alpha=0.15, color='#F44336', label='Tachycardia (>150)')
+    
+    # Process Polar HR if available
+    has_polar_hr = polar_hr_series is not None and len(polar_hr_series) > 0
+    polar_smoothed = None
+    min_len_polar = 0
+    
+    if has_polar_hr:
+        polar_downsampled = polar_hr_series[::downsample_factor]
+        # Apply light smoothing to Polar HR as well for cleaner visualization
+        polar_window = min(5, len(polar_downsampled) // 4)
+        if polar_window > 1:
+            polar_smoothed = pd.Series(polar_downsampled).rolling(window=polar_window, center=True, min_periods=1).median().values
+        else:
+            polar_smoothed = polar_downsampled
+        min_len_polar = min(len(polar_smoothed), len(time_minutes))
+        print(f"   📊 Polar HR for chart: {len(polar_downsampled)} points, plotting {min_len_polar} points")
+    
+    # Calculate Y-axis limits FIRST to properly scale the chart
+    min_len = min(len(hr_smoothed), len(time_minutes))
+    all_hr_values = list(hr_smoothed[:min_len])
+    if has_polar_hr and polar_smoothed is not None:
+        all_hr_values.extend(list(polar_smoothed[:min_len_polar]))
+    
+    # Use combined data for Y-axis limits
+    hr_min = max(30, np.nanpercentile(all_hr_values, 1) - 5)
+    hr_max = min(200, np.nanpercentile(all_hr_values, 99) + 10)
+    
+    # Plot Polar HR if available (ground truth) - thicker, prominent
+    if has_polar_hr and min_len_polar > 0:
+        ax.plot(time_minutes[:min_len_polar], polar_smoothed[:min_len_polar], 
+                color='#1565C0', linewidth=2.5, alpha=0.95, label='Polar HR (Validated)', zorder=5)
+    
+    # Plot smoothed ECG-derived HR (cleaner line)
+    ax.plot(time_minutes[:min_len], hr_smoothed[:min_len], 
+            color='#8D0A1E', linewidth=1.5, alpha=0.8, label='ECG HR (Smoothed)', zorder=4)
+    
+    # Shade motion periods if available
+    if motion_flag is not None and len(motion_flag) > 0:
+        motion_downsampled = motion_flag[::downsample_factor]
+        min_len = min(len(motion_downsampled), len(time_minutes))
+        for i in range(min_len - 1):
+            if motion_downsampled[i]:
+                ax.axvspan(time_minutes[i], time_minutes[i+1], 
+                          alpha=0.1, color='#9E9E9E', linewidth=0)
+    
+    # Mark ectopic events as scatter points on the smoothed line
+    if ectopic_indices is not None and len(ectopic_indices) > 0:
+        ectopic_times = ectopic_indices / sr / 60.0  # Convert to minutes
+        # Get smoothed HR at ectopic times (for better visual placement)
+        ectopic_hr = []
+        for idx in ectopic_indices:
+            ds_idx = idx // downsample_factor
+            if ds_idx < len(hr_smoothed):
+                ectopic_hr.append(hr_smoothed[ds_idx])
+            else:
+                ectopic_hr.append(np.nan)
+        
+        valid_mask = ~np.isnan(ectopic_hr)
+        if np.any(valid_mask):
+            ax.scatter(np.array(ectopic_times)[valid_mask], np.array(ectopic_hr)[valid_mask],
+                      color='#FF5722', s=30, alpha=0.7, marker='o', 
+                      edgecolors='white', linewidths=0.5, label='Ectopic Events', zorder=6)
+    
+    # Add symptom markers as vertical lines with labels
+    if markers_data:
+        for i, marker in enumerate(markers_data):
+            marker_time_min = marker.get('sample_index', 0) / sr / 60.0
+            marker_label = marker.get('marker_label', f'Marker {i+1}')
+            
+            # Truncate long labels
+            if len(marker_label) > 15:
+                marker_label = marker_label[:12] + "..."
+            
+            ax.axvline(x=marker_time_min, color='#673AB7', linestyle='--', 
+                      linewidth=2, alpha=0.8)
+            
+            # Add label at top
+            y_pos = ax.get_ylim()[1] - 5
+            ax.annotate(f'📍 {marker_label}', 
+                       xy=(marker_time_min, y_pos),
+                       fontsize=8, color='#673AB7', fontweight='bold',
+                       rotation=90, ha='right', va='top')
+    
+    # Reference lines
+    ax.axhline(y=60, color='#666', linestyle=':', linewidth=1, alpha=0.5)
+    ax.axhline(y=100, color='#666', linestyle=':', linewidth=1, alpha=0.5)
+    
+    # Styling
+    ax.set_xlabel('Time (minutes)', fontsize=11, fontweight='500')
+    ax.set_ylabel('Heart Rate (bpm)', fontsize=11, fontweight='500')
+    ax.set_title('Heart Rate Trend', fontsize=14, fontweight='bold', color='#333')
+    
+    ax.set_xlim(0, duration_min)
+    
+    # Y limits already calculated above to encompass both HR series
+    ax.set_ylim(hr_min, hr_max)
+    
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+    
+    # Add time annotations every 5 minutes
+    for t in range(0, int(duration_min) + 1, 5):
+        if t > 0 and t < duration_min:
+            actual_time = start_time + timedelta(minutes=t)
+            ax.annotate(actual_time.strftime('%H:%M'), 
+                       xy=(t, hr_min + 2), fontsize=7, color='#999', ha='center')
+    
+    plt.tight_layout()
+    
+    # Save to base64
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=120, bbox_inches='tight', facecolor='white')
+    plt.close()
+    buf.seek(0)
+    b64 = base64.b64encode(buf.read()).decode('utf-8')
+    buf.close()
+    
+    print("   ✅ HR trend chart generated")
+    return b64
+
+
 # ==========================================
 # 5. MAIN PROCESSING FUNCTION
 # ==========================================
-def process_ecg_data(ecg_content, marker_content=None, acc_content=None, report_id="report"):
+def process_ecg_data(ecg_content, marker_content=None, acc_content=None, hr_content=None, report_id="report"):
     """
     Main processing function that returns a result dict with report data.
     Works with file content strings instead of file paths.
     Returns structured data for database storage including marker patterns.
+    
+    Args:
+        ecg_content: ECG file content string
+        marker_content: Marker file content string (optional)
+        acc_content: Accelerometer file content string (optional)
+        hr_content: Polar HR file content string (optional) - provides validated HR data
+        report_id: Unique report identifier
     """
     result = {
         "success": False,
@@ -542,6 +816,13 @@ def process_ecg_data(ecg_content, marker_content=None, acc_content=None, report_
 
         # 3. Motion Gating (using content string now)
         motion_flag, motion_stats = load_acc_motion(acc_content, start_time, sr, len(ecg_clean))
+
+        # 3b. Load Polar HR data if available
+        polar_hr_series, polar_hr_stats = load_hr_data(hr_content, start_time, sr, len(ecg_clean))
+        
+        # Debug: Verify polar data was loaded
+        if polar_hr_series is not None:
+            print(f"   ✅ Polar HR interpolated: {len(polar_hr_series)} samples for chart")
 
         # 4. Rhythm & Events
         rr_ints, beat_types, global_burden, ectopic_mask = analyze_rhythm(rpeaks, sr)
@@ -585,7 +866,7 @@ def process_ecg_data(ecg_content, marker_content=None, acc_content=None, report_
         
         # 6. Calculate Advanced Metrics ON BASELINE
         baseline_metrics = calculate_metrics_on_segment(baseline_seg, sr, "Baseline")
-        global_stats = calculate_global_stats(signals, rpeaks, sr)
+        global_stats = calculate_global_stats(signals, rpeaks, sr, polar_hr_series, polar_hr_stats)
         
         result["mean_hr"] = global_stats["mean_hr"]
         result["max_hr"] = global_stats["max_hr"]
@@ -595,9 +876,13 @@ def process_ecg_data(ecg_content, marker_content=None, acc_content=None, report_
         result["sampling_rate"] = sr
         result["sample_count"] = len(ecg_raw)
         result["motion_stats"] = motion_stats
+        result["hr_source"] = global_stats.get("hr_source", "ECG-derived")
+        result["ecg_mean_hr"] = global_stats.get("ecg_mean_hr", 0)
+        result["ecg_max_hr"] = global_stats.get("ecg_max_hr", 0)
+        result["ecg_min_hr"] = global_stats.get("ecg_min_hr", 0)
         
-        # Get heart rate series for marker pattern detection
-        hr_series = signals["ECG_Rate"].astype(float) if "ECG_Rate" in signals else None
+        # Get heart rate series for marker pattern detection (use Polar if available)
+        hr_series = polar_hr_series if polar_hr_series is not None else (signals["ECG_Rate"].astype(float) if "ECG_Rate" in signals else None)
         
         # 7. Process Markers with Pattern Detection
         markers_html = ""
@@ -686,6 +971,34 @@ def process_ecg_data(ecg_content, marker_content=None, acc_content=None, report_
 
         # 8. Generate Visuals (all in-memory now)
         
+        # HR Trend Chart - generate with all clinical annotations
+        ecg_hr_series = signals["ECG_Rate"].astype(float) if "ECG_Rate" in signals else None
+        
+        # Get ectopic beat indices for overlay
+        ectopic_indices = np.where(ectopic_mask)[0] if ectopic_mask is not None else None
+        # Convert R-peak indices to sample indices
+        if ectopic_indices is not None and len(ectopic_indices) > 0:
+            ectopic_sample_indices = rpeaks[ectopic_indices[ectopic_indices < len(rpeaks)]]
+        else:
+            ectopic_sample_indices = None
+        
+        # Debug: Check if polar_hr_series is available
+        if polar_hr_series is not None:
+            print(f"   📊 Polar HR series ready: {len(polar_hr_series)} samples, range {np.min(polar_hr_series):.0f}-{np.max(polar_hr_series):.0f} bpm")
+        else:
+            print("   ⚠️ No Polar HR series available for chart")
+        
+        b64_hr_trend = create_hr_trend_chart(
+            hr_series=ecg_hr_series,
+            sr=sr,
+            start_time=start_time,
+            duration_min=result["duration_min"],
+            markers_data=processed_markers,
+            ectopic_indices=ectopic_sample_indices,
+            polar_hr_series=polar_hr_series,
+            motion_flag=motion_flag
+        )
+        
         # Baseline Plot - generate to base64 directly
         b64_base = create_ecg_plot_base64(baseline_seg, sr, "BASELINE (Cleanest Resting Segment)", "#2E7D32")
         result["baseline_plot_base64"] = b64_base
@@ -741,6 +1054,7 @@ def process_ecg_data(ecg_content, marker_content=None, acc_content=None, report_
 
         # 9. Responsive HTML Generation (no file I/O)
         html = generate_report_html(
+            report_id=report_id,
             start_time=start_time,
             ecg_clean=ecg_clean,
             sr=sr,
@@ -749,6 +1063,7 @@ def process_ecg_data(ecg_content, marker_content=None, acc_content=None, report_
             motion_stats=motion_stats,
             baseline_metrics=baseline_metrics,
             b64_base=b64_base,
+            b64_hr_trend=b64_hr_trend,
             markers_html=markers_html,
             events_html=events_html,
             pattern_rows=pattern_rows
@@ -769,10 +1084,45 @@ def process_ecg_data(ecg_content, marker_content=None, acc_content=None, report_
         return result
 
 
-def generate_report_html(start_time, ecg_clean, sr, global_stats, global_burden, 
-                         motion_stats, baseline_metrics, b64_base, markers_html, 
-                         events_html, pattern_rows):
+def generate_report_html(report_id, start_time, ecg_clean, sr, global_stats, global_burden, 
+                         motion_stats, baseline_metrics, b64_base, b64_hr_trend,
+                         markers_html, events_html, pattern_rows):
     """Generate the HTML report content."""
+    
+    # Generate HR source indicator
+    hr_source = global_stats.get("hr_source", "ECG-derived")
+    hr_source_badge = ""
+    if hr_source == "Polar HR File":
+        hr_source_badge = "<span style='background: #e3f2fd; color: #1565c0; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; margin-left: 8px;'>✓ Polar Validated</span>"
+    else:
+        hr_source_badge = "<span style='background: #fff3e0; color: #e65100; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; margin-left: 8px;'>ECG-Derived</span>"
+    
+    # HR trend section
+    hr_trend_section = ""
+    if b64_hr_trend:
+        hr_trend_section = f"""
+            <h2>📈 Heart Rate Trend {hr_source_badge}</h2>
+            <p style="font-size: 0.9rem; color: #666; margin-bottom: 15px;">
+                Heart rate over time with symptom markers and ectopic events highlighted.
+                {'''<br><strong style="color: #1565C0;">Blue line</strong>: Polar HR (validated) | 
+                <strong style="color: #8D0A1E;">Red line</strong>: ECG-derived HR (smoothed)''' if global_stats.get("hr_source") == "Polar HR File" else 
+                '<br><em>ECG-derived HR shown with smoothing to reduce noise from ectopic beats.</em>'}
+            </p>
+            <div class="plot-container">
+                <img src="data:image/png;base64,{b64_hr_trend}" alt="HR Trend Chart">
+            </div>
+            <div class="hr-legend" style="display: flex; flex-wrap: wrap; gap: 15px; margin-top: 10px; font-size: 0.85rem; padding: 10px; background: #f9f9f9; border-radius: 8px;">
+                <span><span style="display: inline-block; width: 12px; height: 12px; background: rgba(33,150,243,0.3); border: 1px solid #2196F3; margin-right: 5px;"></span>Bradycardia (&lt;50)</span>
+                <span><span style="display: inline-block; width: 12px; height: 12px; background: rgba(76,175,80,0.15); border: 1px solid #4CAF50; margin-right: 5px;"></span>Normal (60-100)</span>
+                <span><span style="display: inline-block; width: 12px; height: 12px; background: rgba(244,67,54,0.3); border: 1px solid #F44336; margin-right: 5px;"></span>Tachycardia (&gt;150)</span>
+                <span><span style="display: inline-block; width: 12px; height: 12px; background: #673AB7; margin-right: 5px;"></span>Symptom Markers</span>
+                <span><span style="display: inline-block; width: 10px; height: 10px; background: #FF5722; border-radius: 50%; margin-right: 5px;"></span>Ectopic Events</span>
+            </div>
+            <p style="font-size: 0.8rem; color: #888; margin-top: 10px; font-style: italic;">
+                💡 <strong>Note:</strong> The faint red shading shows raw beat-to-beat HR variability caused by ectopic beats. 
+                The solid red line is smoothed (15-second median) to show the underlying trend.
+            </p>
+        """
     
     return f"""
     <!DOCTYPE html>
@@ -909,6 +1259,48 @@ def generate_report_html(start_time, ecg_clean, sr, global_stats, global_burden,
                 border-top: 1px solid var(--border-color);
                 text-align: center;
             }}
+            
+            /* Action buttons */
+            .action-bar {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 1rem;
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }}
+            .btn {{
+                display: inline-flex;
+                align-items: center;
+                gap: 0.5rem;
+                padding: 0.5rem 1rem;
+                border-radius: 6px;
+                font-weight: 500;
+                text-decoration: none;
+                cursor: pointer;
+                border: none;
+                font-size: 0.9rem;
+                transition: all 0.2s;
+            }}
+            .btn-secondary {{
+                background: var(--light-bg);
+                color: var(--primary-color);
+                border: 1px solid var(--border-color);
+            }}
+            .btn-secondary:hover {{
+                background: #e0e0e0;
+            }}
+            .btn-primary {{
+                background: var(--primary-color);
+                color: white;
+            }}
+            .btn-primary:hover {{
+                background: var(--primary-light);
+            }}
+            .btn:disabled {{
+                opacity: 0.6;
+                cursor: not-allowed;
+            }}
 
             /* Responsive Tweaks */
             @media (max-width: 600px) {{
@@ -917,12 +1309,18 @@ def generate_report_html(start_time, ecg_clean, sr, global_stats, global_burden,
                 h2 {{ font-size: 1.2rem; }}
                 .metric-box {{ grid-template-columns: 1fr 1fr; gap: 10px; padding: 15px; }}
                 .val {{ font-size: 1.3rem; }}
+                .action-bar {{ flex-direction: column; align-items: stretch; }}
             }}
         </style>
     </head>
     <body>
         <div class="container">
-            <a href="/calendar" class="back-link">← Back to Calendar</a>
+            <div class="action-bar">
+                <a href="/calendar" class="btn btn-secondary">← Back to Calendar</a>
+                <form action="/report/{report_id}/recalculate" method="post" style="margin: 0;" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').innerHTML='⏳ Recalculating...';">
+                    <button type="submit" class="btn btn-primary">🔄 Recalculate Report</button>
+                </form>
+            </div>
             
             <h1>🏥 Clinical ECG Report <span style="font-size: 1rem; font-weight: normal; color: #666;">(Heart Diary)</span></h1>
             <p style="color: #555;">
@@ -932,7 +1330,7 @@ def generate_report_html(start_time, ecg_clean, sr, global_stats, global_burden,
             
             <h2>📊 Session Metrics</h2>
             <div class="metric-box">
-                <div class="metric"><div class="val">{global_stats['mean_hr']}</div><div class="lbl">Avg HR (bpm)</div></div>
+                <div class="metric"><div class="val">{global_stats['mean_hr']}</div><div class="lbl">Avg HR (bpm)<br><small style="color:#888;font-size:0.7rem;">{global_stats.get('hr_source', 'ECG')}</small></div></div>
                 <div class="metric"><div class="val">{global_stats['max_hr']}</div><div class="lbl">Max HR</div></div>
                 <div class="metric"><div class="val">{global_burden:.2f}%</div><div class="lbl">Ectopic Burden</div></div>
                 <div class="metric"><div class="val">{motion_stats['rest_ratio']:.1f}%</div><div class="lbl">Rest Time</div></div>
@@ -941,6 +1339,7 @@ def generate_report_html(start_time, ecg_clean, sr, global_stats, global_burden,
             <h3>📈 Detailed Statistics</h3>
             <table class="stats-table">
                 <tr><th>Metric</th><th>Value</th></tr>
+                <tr><td>HR Source</td><td><strong>{global_stats.get('hr_source', 'ECG-derived')}</strong></td></tr>
                 <tr><td>HRV (SDNN)</td><td>{global_stats['sdnn']} ms</td></tr>
                 <tr><td>pNN50 (Var.)</td><td>{global_stats['pnn50']} %</td></tr>
                 <tr><td>High 1-min HR</td><td>{global_stats['high_1min']} bpm</td></tr>
@@ -948,8 +1347,14 @@ def generate_report_html(start_time, ecg_clean, sr, global_stats, global_burden,
                 <tr><td>HF Power (Norm)</td><td>{global_stats['hf']} %</td></tr>
                 <tr><td>Tachycardia Time (>150)</td><td>{global_stats['tachy_perc']:.1f} %</td></tr>
                 <tr><td>Bradycardia Time (<50)</td><td>{global_stats['brady_perc']:.1f} %</td></tr>
+                <tr><th colspan='2' style='background: #e3f2fd; color: #1565c0; font-size: 0.85rem; padding-top: 10px;'>ECG-Derived HR (for comparison)</th></tr>
+                <tr><td>ECG Avg HR</td><td>{global_stats.get('ecg_mean_hr', 'N/A')} bpm</td></tr>
+                <tr><td>ECG Max HR</td><td>{global_stats.get('ecg_max_hr', 'N/A')} bpm</td></tr>
+                <tr><td>ECG Min HR</td><td>{global_stats.get('ecg_min_hr', 'N/A')} bpm</td></tr>
                 {pattern_rows}
             </table>
+            
+            {hr_trend_section}
             
             <h2>❤️ Baseline Morphology <span style="font-size: 1rem; font-weight: normal; color: #666;">(Resting)</span></h2>
             <p style="font-size: 0.9rem; color: #666; margin-bottom: 15px;">

@@ -512,6 +512,99 @@
             display: block;
         }
         
+        /* Bulk Upload Styles */
+        .bulk-wrapper {
+            min-height: 150px;
+        }
+        
+        .file-preview {
+            background: var(--light-bg);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        
+        .file-preview h4 {
+            margin-bottom: 0.75rem;
+            color: var(--text-color);
+        }
+        
+        .file-group {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 0.75rem;
+        }
+        
+        .file-group h5 {
+            margin: 0 0 0.5rem 0;
+            color: var(--primary-color);
+            font-size: 0.9rem;
+        }
+        
+        .file-group .files {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        
+        .file-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .file-tag.ecg { background: #e8f5e9; color: #2e7d32; }
+        .file-tag.hr { background: #fff3e0; color: #e65100; }
+        .file-tag.acc { background: #e3f2fd; color: #1565c0; }
+        .file-tag.marker { background: #f3e5f5; color: #7b1fa2; }
+        .file-tag.unknown { background: #fafafa; color: #666; }
+        
+        .bulk-results {
+            margin-top: 1rem;
+        }
+        
+        .result-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem;
+            border-radius: 6px;
+            margin-bottom: 0.5rem;
+        }
+        
+        .result-item.success {
+            background: #e8f5e9;
+            border: 1px solid #c8e6c9;
+        }
+        
+        .result-item.error {
+            background: #ffebee;
+            border: 1px solid #ffcdd2;
+        }
+        
+        .result-item .icon {
+            font-size: 1.2rem;
+        }
+        
+        .result-item .info {
+            flex: 1;
+        }
+        
+        .result-item .info strong {
+            display: block;
+            color: var(--text-color);
+        }
+        
+        .result-item .info small {
+            color: var(--text-muted);
+        }
+
         /* Responsive */
         @media (max-width: 768px) {
             .navbar {
@@ -583,16 +676,24 @@
         <div class="card">
             <h2>📤 Upload ECG Data</h2>
             
-            <div class="info-box">
-                <h3>ℹ️ Supported Files</h3>
-                <ul>
-                    <li><strong>ECG Log</strong> - Polar H10 ECG export (.txt/.csv) - Required</li>
-                    <li><strong>Accelerometer Log</strong> - Motion data for activity detection - Optional</li>
-                    <li><strong>Marker Log</strong> - Symptom markers with timestamps - Optional</li>
-                </ul>
+            <div class="tabs">
+                <button class="tab-btn active" onclick="switchTab('single')">Single Session</button>
+                <button class="tab-btn" onclick="switchTab('bulk')">Bulk Upload</button>
             </div>
             
-            <form class="upload-form" action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
+            <!-- Single Upload Tab -->
+            <div class="tab-content active" id="singleTab">
+                <div class="info-box">
+                    <h3>ℹ️ Supported Files</h3>
+                    <ul>
+                        <li><strong>ECG Log</strong> - Polar H10 ECG export (.txt/.csv) - Required</li>
+                        <li><strong>HR Log</strong> - Polar HR data for accurate heart rate - Recommended</li>
+                        <li><strong>Accelerometer Log</strong> - Motion data for activity detection - Optional</li>
+                        <li><strong>Marker Log</strong> - Symptom markers with timestamps - Optional</li>
+                    </ul>
+                </div>
+                
+                <form class="upload-form" action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
                 <div class="form-group">
                     <label>
                         📈 ECG Log <span class="required">*</span>
@@ -619,6 +720,18 @@
                 
                 <div class="form-group">
                     <label>
+                        💓 HR Log <span class="optional">(Recommended)</span>
+                    </label>
+                    <div class="file-input-wrapper" id="hrWrapper">
+                        <div class="icon">📄</div>
+                        <div class="text">Click or drag to upload HR file for accurate BPM</div>
+                        <div class="filename" id="hrFilename"></div>
+                        <input type="file" name="hr_file" id="hrFile" accept=".txt,.csv">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>
                         📍 Marker Log <span class="optional">(Optional)</span>
                     </label>
                     <div class="file-input-wrapper" id="markerWrapper">
@@ -638,6 +751,48 @@
                     🔬 Analyze ECG Data
                 </button>
             </form>
+            </div>
+            
+            <!-- Bulk Upload Tab -->
+            <div class="tab-content" id="bulkTab">
+                <div class="info-box">
+                    <h3>📁 Bulk Upload</h3>
+                    <p>Select multiple Polar files at once. Files will be automatically matched by device ID and timestamp.</p>
+                    <ul>
+                        <li>Select all your Polar export files (ECG, HR, ACC, Marker)</li>
+                        <li>Files are auto-grouped by session (within ~1 min of each other)</li>
+                        <li>File naming: <code>Polar_H10_DEVICEID_YYYYMMDD_HHMMSS_TYPE.txt</code></li>
+                    </ul>
+                </div>
+                
+                <form class="upload-form" action="/bulk-upload" method="post" enctype="multipart/form-data" id="bulkUploadForm">
+                    <div class="form-group">
+                        <label>
+                            📁 Select Polar Files <span class="required">*</span>
+                        </label>
+                        <div class="file-input-wrapper bulk-wrapper" id="bulkWrapper">
+                            <div class="icon">📂</div>
+                            <div class="text">Click or drag to select multiple files</div>
+                            <div class="filename" id="bulkFilename"></div>
+                            <input type="file" name="files" id="bulkFiles" accept=".txt,.csv" multiple required>
+                        </div>
+                    </div>
+                    
+                    <div id="filePreview" class="file-preview" style="display: none;">
+                        <h4>📋 Files to upload:</h4>
+                        <div id="fileList"></div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>📝 Notes <span class="optional">(Optional - applies to all sessions)</span></label>
+                        <textarea name="notes" placeholder="Add any notes about these recording sessions..."></textarea>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary" id="bulkSubmitBtn">
+                        🚀 Process All Sessions
+                    </button>
+                </form>
+            </div>
         </div>
         
         {% elif active_tab == 'calendar' %}
@@ -668,6 +823,51 @@
                 <!-- Reports will be populated by JS -->
             </div>
         </div>
+        
+        {% elif active_tab == 'bulk_results' %}
+        <!-- Bulk Upload Results -->
+        <div class="card">
+            <h2>📊 Bulk Upload Results</h2>
+            
+            <div class="info-box" style="background: {% if bulk_results.failed == 0 %}#e8f5e9; border-color: #4caf50;{% else %}#fff3e0; border-color: #ff9800;{% endif %}">
+                <h3 style="color: {% if bulk_results.failed == 0 %}#2e7d32{% else %}#e65100{% endif %};">
+                    {% if bulk_results.failed == 0 %}✅ All sessions processed successfully!{% else %}⚠️ Some sessions had issues{% endif %}
+                </h3>
+                <p style="margin-top: 0.5rem;">
+                    <strong>{{ bulk_results.successful }}</strong> of <strong>{{ bulk_results.total }}</strong> sessions processed successfully
+                    {% if bulk_results.failed > 0 %} • <strong style="color: #c62828;">{{ bulk_results.failed }} failed</strong>{% endif %}
+                </p>
+            </div>
+            
+            <div class="bulk-results">
+                {% for result in bulk_results.results %}
+                <div class="result-item {{ result.status }}">
+                    <div class="icon">{% if result.status == 'success' %}✅{% else %}❌{% endif %}</div>
+                    <div class="info">
+                        <strong>{{ result.ecg_file }}</strong>
+                        <small>
+                            {% if result.status == 'success' %}
+                                {{ result.mean_hr }} bpm avg • {{ "%.1f"|format(result.duration_min) }} min
+                                {% if result.hr_file %} • HR: ✓{% endif %}
+                                {% if result.acc_file %} • ACC: ✓{% endif %}
+                                {% if result.marker_file %} • Markers: ✓{% endif %}
+                            {% else %}
+                                Error: {{ result.error }}
+                            {% endif %}
+                        </small>
+                    </div>
+                    {% if result.status == 'success' %}
+                    <a href="/report/{{ result.report_id }}" class="btn btn-primary" style="padding: 0.5rem 1rem;">View Report</a>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            
+            <div style="margin-top: 1.5rem; display: flex; gap: 1rem;">
+                <a href="/" class="btn btn-primary">📤 Upload More</a>
+                <a href="/calendar" class="btn" style="background: var(--light-bg); color: var(--text-color);">📅 View Calendar</a>
+            </div>
+        </div>
         {% endif %}
     </div>
     
@@ -678,6 +878,20 @@
     
     <script>
         {% if active_tab == 'upload' %}
+        // Tab switching
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            
+            if (tab === 'single') {
+                document.querySelector('.tab-btn:first-child').classList.add('active');
+                document.getElementById('singleTab').classList.add('active');
+            } else {
+                document.querySelector('.tab-btn:last-child').classList.add('active');
+                document.getElementById('bulkTab').classList.add('active');
+            }
+        }
+        
         // File input handlers
         function setupFileInput(inputId, wrapperId, filenameId) {
             const input = document.getElementById(inputId);
@@ -697,9 +911,108 @@
         
         setupFileInput('ecgFile', 'ecgWrapper', 'ecgFilename');
         setupFileInput('accFile', 'accWrapper', 'accFilename');
+        setupFileInput('hrFile', 'hrWrapper', 'hrFilename');
         setupFileInput('markerFile', 'markerWrapper', 'markerFilename');
         
-        // Form submission
+        // Bulk file input handler
+        document.getElementById('bulkFiles').addEventListener('change', function() {
+            const wrapper = document.getElementById('bulkWrapper');
+            const filenameDiv = document.getElementById('bulkFilename');
+            const preview = document.getElementById('filePreview');
+            const fileList = document.getElementById('fileList');
+            
+            if (this.files.length > 0) {
+                wrapper.classList.add('has-file');
+                filenameDiv.textContent = `${this.files.length} files selected`;
+                
+                // Group files by session
+                const groups = groupPolarFiles(Array.from(this.files));
+                
+                if (groups.length > 0) {
+                    preview.style.display = 'block';
+                    fileList.innerHTML = groups.map((group, idx) => `
+                        <div class="file-group">
+                            <h5>📊 Session ${idx + 1}: ${group.date} ${group.time}</h5>
+                            <div class="files">
+                                ${group.ecg ? `<span class="file-tag ecg">✓ ECG</span>` : ''}
+                                ${group.hr ? `<span class="file-tag hr">✓ HR</span>` : '<span class="file-tag unknown">○ HR missing</span>'}
+                                ${group.acc ? `<span class="file-tag acc">✓ ACC</span>` : ''}
+                                ${group.marker ? `<span class="file-tag marker">✓ Marker</span>` : ''}
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    preview.style.display = 'block';
+                    fileList.innerHTML = '<p style="color: #c62828;">⚠️ No valid ECG files found. Make sure files follow Polar naming convention.</p>';
+                }
+            } else {
+                wrapper.classList.remove('has-file');
+                filenameDiv.textContent = '';
+                preview.style.display = 'none';
+            }
+        });
+        
+        function groupPolarFiles(files) {
+            const pattern = /Polar_H10_([A-F0-9]+)_(\d{8})_(\d{6})_([A-Z]+)\.txt/i;
+            const markerPattern = /MARKER_(\d{8})_(\d{6})\.txt/i;
+            
+            const groups = {};
+            
+            files.forEach(file => {
+                const match = file.name.match(pattern);
+                if (match) {
+                    const [, deviceId, date, time, type] = match;
+                    
+                    // Find or create group (within 1 minute tolerance)
+                    let groupKey = null;
+                    for (const key in groups) {
+                        const [gDevice, gDate, gTime] = key.split('_');
+                        if (gDevice === deviceId && gDate === date) {
+                            if (Math.abs(parseInt(time) - parseInt(gTime)) <= 100) {
+                                groupKey = key;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!groupKey) {
+                        groupKey = `${deviceId}_${date}_${time}`;
+                        groups[groupKey] = {
+                            deviceId, date, time,
+                            ecg: null, hr: null, acc: null, marker: null
+                        };
+                    }
+                    
+                    const fileType = type.toUpperCase();
+                    if (fileType === 'ECG') groups[groupKey].ecg = file;
+                    else if (fileType === 'HR') groups[groupKey].hr = file;
+                    else if (fileType === 'ACC') groups[groupKey].acc = file;
+                }
+                
+                // Check for marker files
+                const markerMatch = file.name.match(markerPattern);
+                if (markerMatch) {
+                    const [, date, time] = markerMatch;
+                    for (const key in groups) {
+                        if (groups[key].date === date) {
+                            groups[key].marker = file;
+                            break;
+                        }
+                    }
+                }
+            });
+            
+            // Filter to only groups with ECG and format date/time
+            return Object.values(groups)
+                .filter(g => g.ecg)
+                .map(g => ({
+                    ...g,
+                    date: `${g.date.slice(0,4)}-${g.date.slice(4,6)}-${g.date.slice(6,8)}`,
+                    time: `${g.time.slice(0,2)}:${g.time.slice(2,4)}:${g.time.slice(4,6)}`
+                }));
+        }
+        
+        // Form submission - single
         document.getElementById('uploadForm').addEventListener('submit', function(e) {
             const ecgFile = document.getElementById('ecgFile');
             if (!ecgFile.files.length) {
@@ -710,6 +1023,21 @@
             
             document.getElementById('loadingOverlay').classList.add('active');
             document.getElementById('submitBtn').disabled = true;
+        });
+        
+        // Form submission - bulk
+        document.getElementById('bulkUploadForm').addEventListener('submit', function(e) {
+            const bulkFiles = document.getElementById('bulkFiles');
+            if (!bulkFiles.files.length) {
+                e.preventDefault();
+                alert('Please select files to upload');
+                return;
+            }
+            
+            document.getElementById('loadingOverlay').classList.add('active');
+            document.getElementById('loadingOverlay').querySelector('p').textContent = 
+                'Processing multiple ECG sessions... This may take a while.';
+            document.getElementById('bulkSubmitBtn').disabled = true;
         });
         {% endif %}
         
