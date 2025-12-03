@@ -10,10 +10,12 @@ services:
     environment:
       - DATABASE_URL=postgresql://heartdiary:heartdiary_secret@db:5432/heartdiary
       - PYTHONUNBUFFERED=1
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_PASSWORD=${AUTH_PASSWORD:-changeme}
     volumes:
-      - ./uploads:/app/uploads
-      - ./reports:/app/reports
-      - ./data:/app/data
+      - uploads_data:/app/uploads
+      - reports_data:/app/reports
+      - app_data:/app/data
     depends_on:
       db:
         condition: service_healthy
@@ -43,6 +45,9 @@ services:
 
 volumes:
   postgres_data:
+  uploads_data:
+  reports_data:
+  app_data:
 
 networks:
   heart-diary-network:

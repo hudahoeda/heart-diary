@@ -2,17 +2,18 @@
 Heart Diary - FastAPI Application for Polar H10 ECG Analysis
 """
 import os
-import json
+import secrets
 import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, Request, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Request, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import create_engine, Column, String, Float, Integer, Boolean, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -21,6 +22,26 @@ from ecg_processor import process_ecg_data, get_report_html
 
 # Initialize FastAPI app
 app = FastAPI(title="Heart Diary", description="Polar H10 ECG Analysis Dashboard")
+
+# HTTP Basic Auth
+security = HTTPBasic()
+
+AUTH_USERNAME = os.getenv("AUTH_USERNAME", "admin")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "changeme")
+
+
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    """Verify HTTP Basic Auth credentials."""
+    correct_username = secrets.compare_digest(credentials.username, AUTH_USERNAME)
+    correct_password = secrets.compare_digest(credentials.password, AUTH_PASSWORD)
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
 
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/heartdiary.db")
@@ -136,13 +157,13 @@ def save_report(report_data: dict):
 
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
+async def home(request: Request, username: str = Depends(verify_credentials)):
     """Home page with upload form."""
     return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.get("/calendar", response_class=HTMLResponse)
-async def calendar_view(request: Request):
+async def calendar_view(request: Request, username: str = Depends(verify_credentials)):
     """Calendar view showing all reports."""
     db = load_reports_db()
     reports = db.get("reports", [])
@@ -155,6 +176,7 @@ async def calendar_view(request: Request):
             reports_by_date[date] = []
         reports_by_date[date].append(report)
     
+    import json
     return templates.TemplateResponse("calendar.html", {
         "request": request,
         "reports": reports,
@@ -163,7 +185,7 @@ async def calendar_view(request: Request):
 
 
 @app.get("/report/{report_id}", response_class=HTMLResponse)
-async def view_report(request: Request, report_id: str):
+async def view_report(request: Request, report_id: str, username: str = Depends(verify_credentials)):
     """View a specific report."""
     db = load_reports_db()
     report = None
@@ -192,7 +214,8 @@ async def upload_files(
     ecg_file: UploadFile = File(...),
     acc_file: Optional[UploadFile] = File(None),
     marker_file: Optional[UploadFile] = File(None),
-    notes: str = Form("")
+    notes: str = Form(""),
+    username: str = Depends(verify_credentials)
 ):
     """Upload and process ECG files."""
     report_id = str(uuid.uuid4())[:8]
@@ -259,7 +282,7 @@ async def upload_files(
 
 
 @app.delete("/report/{report_id}")
-async def delete_report(report_id: str):
+async def delete_report(report_id: str, username: str = Depends(verify_credentials)):
     """Delete a report."""
     db = SessionLocal()
     try:
@@ -284,7 +307,7 @@ async def delete_report(report_id: str):
 
 
 @app.get("/api/reports")
-async def get_reports():
+async def get_reports(username: str = Depends(verify_credentials)):
     """Get all reports as JSON (for calendar)."""
     db = load_reports_db()
     return db.get("reports", [])
