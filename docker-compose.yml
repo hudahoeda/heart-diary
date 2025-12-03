@@ -1,10 +1,12 @@
 services:
   app:
     build: .
-    restart: unless-stopped
-    expose:
-      - "8000"
+    ports:
+      - "${PORT:-8000}:8000"
     environment:
+      - TZ=${TZ:-UTC}
+      - PORT=8000
+      - HOST=0.0.0.0
       - DATABASE_URL=${DATABASE_URL:-postgresql://heartdiary:heartdiary_secret@db:5432/heartdiary}
       - PYTHONUNBUFFERED=1
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}
@@ -16,8 +18,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -25,14 +28,15 @@ services:
 
   db:
     image: postgres:15-alpine
-    restart: unless-stopped
     environment:
+      - TZ=${TZ:-UTC}
       - POSTGRES_USER=${POSTGRES_USER:-heartdiary}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-heartdiary_secret}
       - POSTGRES_DB=${POSTGRES_DB:-heartdiary}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-heartdiary} -d ${POSTGRES_DB:-heartdiary}"]
       interval: 5s
