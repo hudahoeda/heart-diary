@@ -1,14 +1,11 @@
-version: '3.8'
-
 services:
   app:
     build: .
-    container_name: heart-diary-app
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     environment:
-      - DATABASE_URL=postgresql://heartdiary:heartdiary_secret@db:5432/heartdiary
+      - DATABASE_URL=${DATABASE_URL:-postgresql://heartdiary:heartdiary_secret@db:5432/heartdiary}
       - PYTHONUNBUFFERED=1
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}
       - AUTH_PASSWORD=${AUTH_PASSWORD:-changeme}
@@ -19,36 +16,31 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    networks:
-      - heart-diary-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   db:
     image: postgres:15-alpine
-    container_name: heart-diary-db
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=heartdiary
-      - POSTGRES_PASSWORD=heartdiary_secret
-      - POSTGRES_DB=heartdiary
+      - POSTGRES_USER=${POSTGRES_USER:-heartdiary}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-heartdiary_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-heartdiary}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U heartdiary -d heartdiary"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-heartdiary} -d ${POSTGRES_DB:-heartdiary}"]
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - heart-diary-network
 
 volumes:
   postgres_data:
   uploads_data:
   reports_data:
   app_data:
-
-networks:
-  heart-diary-network:
-    driver: bridge
