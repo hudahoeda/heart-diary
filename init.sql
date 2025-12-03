@@ -14,7 +14,13 @@ CREATE TABLE IF NOT EXISTS reports (
     ecg_filename VARCHAR(255),
     has_acc BOOLEAN DEFAULT FALSE,
     has_marker BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Store file contents in database
+    ecg_data TEXT,           -- Raw ECG file content
+    acc_data TEXT,           -- Raw accelerometer file content
+    marker_data TEXT,        -- Raw marker file content
+    report_html TEXT         -- Generated report HTML
 );
 
 -- Index for faster date queries

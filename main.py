@@ -3,8 +3,8 @@ Heart Diary - FastAPI Application for Polar H10 ECG Analysis
 """
 import os
 import secrets
-import shutil
 import uuid
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -14,11 +14,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from sqlalchemy import create_engine, Column, String, Float, Integer, Boolean, DateTime, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 
-from ecg_processor import process_ecg_data, get_report_html
+from ecg_processor import process_ecg_data
+
+# Import database models and connection from database package
+from database import (
+    Base, Report, ECGData, AccelerometerData, MarkerData, ReportHTML,
+    SessionLocal, get_db
+)
+from database.connection import engine
+from database.migrate import create_tables
 
 # Initialize FastAPI app
 app = FastAPI(title="Heart Diary", description="Polar H10 ECG Analysis Dashboard")
@@ -43,71 +48,27 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 
-# Database setup
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/heartdiary.db")
+# Create database tables on startup
+create_tables()
 
-# Handle SQLite vs PostgreSQL
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-else:
-    engine = create_engine(DATABASE_URL)
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
-# Database Model
-class Report(Base):
-    __tablename__ = "reports"
-    
-    id = Column(String(8), primary_key=True)
-    date = Column(DateTime, nullable=False)
-    duration_min = Column(Float, default=0)
-    mean_hr = Column(Integer, default=0)
-    max_hr = Column(Integer, default=0)
-    min_hr = Column(Integer, default=0)
-    ectopic_burden = Column(Float, default=0)
-    sdnn = Column(Integer, default=0)
-    pnn50 = Column(Integer, default=0)
-    notes = Column(Text, nullable=True)
-    ecg_filename = Column(String(255), nullable=True)
-    has_acc = Column(Boolean, default=False)
-    has_marker = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-# Create tables
-Base.metadata.create_all(bind=engine)
-
-# Create directories
+# Create directories (only static and data needed now)
 BASE_DIR = Path(__file__).parent
-UPLOADS_DIR = BASE_DIR / "uploads"
-REPORTS_DIR = BASE_DIR / "reports"
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = BASE_DIR / "data"
 
-for directory in [UPLOADS_DIR, REPORTS_DIR, TEMPLATES_DIR, STATIC_DIR, DATA_DIR]:
+for directory in [TEMPLATES_DIR, STATIC_DIR, DATA_DIR]:
     directory.mkdir(exist_ok=True)
 
 # Set up templates
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-# Mount static files
+# Mount static files (only static needed, reports are served from database)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-app.mount("/reports", StaticFiles(directory=str(REPORTS_DIR)), name="reports")
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 def load_reports_db() -> dict:
-    """Load reports from database."""
+    """Load reports from database with related data."""
     db = SessionLocal()
     try:
         reports = db.query(Report).order_by(Report.date.desc()).all()
@@ -119,7 +80,10 @@ def load_reports_db() -> dict:
                     "duration_min": r.duration_min,
                     "mean_hr": r.mean_hr,
                     "max_hr": r.max_hr,
+                    "min_hr": r.min_hr,
                     "ectopic_burden": r.ectopic_burden,
+                    "sdnn": r.sdnn,
+                    "pnn50": r.pnn50,
                     "notes": r.notes,
                     "ecg_filename": r.ecg_filename,
                     "has_acc": r.has_acc,
@@ -133,25 +97,85 @@ def load_reports_db() -> dict:
         db.close()
 
 
-def save_report(report_data: dict):
-    """Save a report to database."""
+def save_report_to_db(report_data: dict, ecg_content: str, acc_content: str = None, 
+                      marker_content: str = None, markers_list: list = None):
+    """
+    Save a report to database with separate tables for each data type.
+    """
     db = SessionLocal()
     try:
+        # 1. Create main report record
         report = Report(
             id=report_data["id"],
             date=datetime.fromisoformat(report_data["date"]) if report_data.get("date") else datetime.utcnow(),
             duration_min=report_data.get("duration_min", 0),
             mean_hr=report_data.get("mean_hr", 0),
             max_hr=report_data.get("max_hr", 0),
+            min_hr=report_data.get("min_hr", 0),
             ectopic_burden=report_data.get("ectopic_burden", 0),
+            sdnn=report_data.get("sdnn", 0),
+            pnn50=report_data.get("pnn50", 0),
             notes=report_data.get("notes", ""),
             ecg_filename=report_data.get("ecg_filename", ""),
-            has_acc=report_data.get("has_acc", False),
-            has_marker=report_data.get("has_marker", False),
+            has_acc=acc_content is not None,
+            has_marker=marker_content is not None,
             created_at=datetime.utcnow()
         )
         db.add(report)
+        db.flush()  # Get the ID before adding related records
+        
+        # 2. Create ECG data record
+        ecg_record = ECGData(
+            report_id=report.id,
+            filename=report_data.get("ecg_filename"),
+            content=ecg_content,
+            sampling_rate=report_data.get("sampling_rate"),
+            sample_count=report_data.get("sample_count")
+        )
+        db.add(ecg_record)
+        
+        # 3. Create Accelerometer data record (if provided)
+        if acc_content:
+            acc_record = AccelerometerData(
+                report_id=report.id,
+                filename=report_data.get("acc_filename"),
+                content=acc_content,
+                rest_ratio=report_data.get("motion_stats", {}).get("rest_ratio", 100.0),
+                active_ratio=report_data.get("motion_stats", {}).get("active_ratio", 0.0)
+            )
+            db.add(acc_record)
+        
+        # 4. Create Marker data records (if provided)
+        if markers_list:
+            for i, marker in enumerate(markers_list):
+                marker_record = MarkerData(
+                    report_id=report.id,
+                    marker_time=datetime.fromisoformat(marker["marker_time"]) if marker.get("marker_time") else None,
+                    marker_label=marker.get("marker_label"),
+                    sample_index=marker.get("sample_index"),
+                    detected_pattern=marker.get("detected_pattern"),
+                    pattern_severity=marker.get("pattern_severity", 0),
+                    hr_at_marker=marker.get("hr_at_marker"),
+                    ecg_plot_base64=marker.get("ecg_plot_base64"),
+                    raw_content=marker_content if i == 0 else None  # Store raw content only in first record
+                )
+                db.add(marker_record)
+        
+        # 5. Create Report HTML record
+        if report_data.get("report_html"):
+            html_record = ReportHTML(
+                report_id=report.id,
+                html_content=report_data["report_html"],
+                baseline_plot_base64=report_data.get("baseline_plot_base64")
+            )
+            db.add(html_record)
+        
         db.commit()
+        return report.id
+        
+    except Exception as e:
+        db.rollback()
+        raise e
     finally:
         db.close()
 
@@ -159,14 +183,18 @@ def save_report(report_data: dict):
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request, username: str = Depends(verify_credentials)):
     """Home page with upload form."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("app.html", {
+        "request": request,
+        "active_tab": "upload",
+        "page_title": "Upload ECG"
+    })
 
 
 @app.get("/calendar", response_class=HTMLResponse)
 async def calendar_view(request: Request, username: str = Depends(verify_credentials)):
     """Calendar view showing all reports."""
-    db = load_reports_db()
-    reports = db.get("reports", [])
+    db_data = load_reports_db()
+    reports = db_data.get("reports", [])
     
     # Organize reports by date for calendar
     reports_by_date = {}
@@ -176,9 +204,10 @@ async def calendar_view(request: Request, username: str = Depends(verify_credent
             reports_by_date[date] = []
         reports_by_date[date].append(report)
     
-    import json
-    return templates.TemplateResponse("calendar.html", {
+    return templates.TemplateResponse("app.html", {
         "request": request,
+        "active_tab": "calendar",
+        "page_title": "Calendar",
         "reports": reports,
         "reports_by_date": json.dumps(reports_by_date)
     })
@@ -186,26 +215,17 @@ async def calendar_view(request: Request, username: str = Depends(verify_credent
 
 @app.get("/report/{report_id}", response_class=HTMLResponse)
 async def view_report(request: Request, report_id: str, username: str = Depends(verify_credentials)):
-    """View a specific report."""
-    db = load_reports_db()
-    report = None
-    for r in db.get("reports", []):
-        if r.get("id") == report_id:
-            report = r
-            break
-    
-    if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
-    
-    # Read the report HTML
-    report_path = REPORTS_DIR / f"{report_id}.html"
-    if not report_path.exists():
-        raise HTTPException(status_code=404, detail="Report file not found")
-    
-    with open(report_path, "r") as f:
-        report_html = f.read()
-    
-    return HTMLResponse(content=report_html)
+    """View a specific report - served from database."""
+    db = SessionLocal()
+    try:
+        # Get report HTML from separate table
+        report_html = db.query(ReportHTML).filter(ReportHTML.report_id == report_id).first()
+        if not report_html:
+            raise HTTPException(status_code=404, detail="Report not found")
+        
+        return HTMLResponse(content=report_html.html_content)
+    finally:
+        db.close()
 
 
 @app.post("/upload")
@@ -217,100 +237,112 @@ async def upload_files(
     notes: str = Form(""),
     username: str = Depends(verify_credentials)
 ):
-    """Upload and process ECG files."""
+    """Upload and process ECG files - store in database instead of files."""
     report_id = str(uuid.uuid4())[:8]
-    upload_subdir = UPLOADS_DIR / report_id
-    upload_subdir.mkdir(exist_ok=True)
     
     try:
-        # Save ECG file
-        ecg_path = upload_subdir / ecg_file.filename
-        with open(ecg_path, "wb") as f:
-            content = await ecg_file.read()
-            f.write(content)
+        # Read file contents as strings (decode from bytes)
+        ecg_content = (await ecg_file.read()).decode('utf-8')
         
-        # Save ACC file if provided
-        acc_path = None
+        acc_content = None
         if acc_file and acc_file.filename:
-            acc_path = upload_subdir / acc_file.filename
-            with open(acc_path, "wb") as f:
-                content = await acc_file.read()
-                f.write(content)
+            acc_content = (await acc_file.read()).decode('utf-8')
         
-        # Save Marker file if provided
-        marker_path = None
+        marker_content = None
         if marker_file and marker_file.filename:
-            marker_path = upload_subdir / marker_file.filename
-            with open(marker_path, "wb") as f:
-                content = await marker_file.read()
-                f.write(content)
+            marker_content = (await marker_file.read()).decode('utf-8')
         
-        # Process the data
+        # Process the data using content strings (no file I/O)
         result = process_ecg_data(
-            str(ecg_path),
-            str(marker_path) if marker_path else None,
-            str(acc_path) if acc_path else None,
-            str(REPORTS_DIR),
+            ecg_content,
+            marker_content,
+            acc_content,
             report_id
         )
         
         if result.get("success"):
-            # Save report to database
+            # Save report to database with file contents and generated HTML
             report_entry = {
                 "id": report_id,
                 "date": result.get("date", datetime.now().isoformat()),
                 "duration_min": result.get("duration_min", 0),
                 "mean_hr": result.get("mean_hr", 0),
                 "max_hr": result.get("max_hr", 0),
+                "min_hr": result.get("min_hr", 0),
                 "ectopic_burden": result.get("ectopic_burden", 0),
+                "sdnn": result.get("sdnn", 0),
+                "pnn50": result.get("pnn50", 0),
                 "notes": notes,
                 "ecg_filename": ecg_file.filename,
-                "has_acc": acc_path is not None,
-                "has_marker": marker_path is not None
+                "acc_filename": acc_file.filename if acc_file and acc_file.filename else None,
+                "sampling_rate": result.get("sampling_rate"),
+                "sample_count": result.get("sample_count"),
+                "motion_stats": result.get("motion_stats", {}),
+                "report_html": result.get("report_html"),
+                "baseline_plot_base64": result.get("baseline_plot_base64")
             }
-            save_report(report_entry)
+            
+            # Save to database with separate tables
+            save_report_to_db(
+                report_entry,
+                ecg_content=ecg_content,
+                acc_content=acc_content,
+                marker_content=marker_content,
+                markers_list=result.get("markers", [])
+            )
             
             return RedirectResponse(url=f"/report/{report_id}", status_code=303)
         else:
             raise HTTPException(status_code=400, detail=result.get("error", "Processing failed"))
             
     except Exception as e:
-        # Clean up on error
-        if upload_subdir.exists():
-            shutil.rmtree(upload_subdir)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/report/{report_id}")
 async def delete_report(report_id: str, username: str = Depends(verify_credentials)):
-    """Delete a report."""
+    """Delete a report and all related data from database (cascade delete)."""
     db = SessionLocal()
     try:
         report = db.query(Report).filter(Report.id == report_id).first()
         if report:
+            # Cascade delete will remove related records from other tables
             db.delete(report)
             db.commit()
+            return {"status": "deleted"}
+        else:
+            raise HTTPException(status_code=404, detail="Report not found")
     finally:
         db.close()
-    
-    # Delete report file
-    report_path = REPORTS_DIR / f"{report_id}.html"
-    if report_path.exists():
-        report_path.unlink()
-    
-    # Delete uploads
-    upload_dir = UPLOADS_DIR / report_id
-    if upload_dir.exists():
-        shutil.rmtree(upload_dir)
-    
-    return {"status": "deleted"}
 
 
 @app.get("/api/reports")
 async def get_reports(username: str = Depends(verify_credentials)):
     """Get all reports as JSON (for calendar)."""
-    db = load_reports_db()
-    return db.get("reports", [])
+    db_data = load_reports_db()
+    return db_data.get("reports", [])
+
+
+@app.get("/api/report/{report_id}/markers")
+async def get_report_markers(report_id: str, username: str = Depends(verify_credentials)):
+    """Get all markers for a specific report with pattern data."""
+    db = SessionLocal()
+    try:
+        markers = db.query(MarkerData).filter(MarkerData.report_id == report_id).all()
+        return [
+            {
+                "id": m.id,
+                "marker_time": m.marker_time.isoformat() if m.marker_time else None,
+                "marker_label": m.marker_label,
+                "sample_index": m.sample_index,
+                "detected_pattern": m.detected_pattern,
+                "pattern_severity": m.pattern_severity,
+                "hr_at_marker": m.hr_at_marker
+            }
+            for m in markers
+        ]
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

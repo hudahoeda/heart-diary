@@ -13,6 +13,7 @@ import shutil
 import base64
 from datetime import datetime, timedelta
 from pathlib import Path
+from io import StringIO, BytesIO
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -21,13 +22,13 @@ warnings.filterwarnings("ignore")
 # ==========================================
 # 1. DATA LOADING & PREP
 # ==========================================
-def load_and_sync_data(ecg_path, marker_path=None):
+def load_and_sync_data(ecg_content, marker_content=None):
     """
-    Load ECG CSV (Polar H10 export) and optional marker file.
+    Load ECG data from content string and optional marker content.
     """
     print("⏳ Loading ECG data...")
     try:
-        df_ecg = pd.read_csv(ecg_path, sep=';', engine='python')
+        df_ecg = pd.read_csv(StringIO(ecg_content), sep=';', engine='python')
         # Find timestamp column (case insensitive)
         ts_col = [c for c in df_ecg.columns if 'phone' in c.lower()]
         if not ts_col:
@@ -55,27 +56,27 @@ def load_and_sync_data(ecg_path, marker_path=None):
         return None, None, None, None
 
 
-def load_markers(marker_path, start_time, sampling_rate):
+def load_markers(marker_content, start_time, sampling_rate):
     df_markers = pd.DataFrame()
-    if marker_path and os.path.exists(marker_path):
+    if marker_content:
         try:
-            df_markers = pd.read_csv(marker_path, sep=';', engine='python')
+            df_markers = pd.read_csv(StringIO(marker_content), sep=';', engine='python')
             print(f"   📍 Markers Loaded: {len(df_markers)} events found.")
         except Exception as e:
             print(f"   ⚠️ Could not load markers: {e}")
     return df_markers
 
 
-def load_acc_motion(acc_path, ecg_start_time, sampling_rate, n_samples):
+def load_acc_motion(acc_content, ecg_start_time, sampling_rate, n_samples):
     """
-    Load accelerometer CSV and produce motion flag.
+    Load accelerometer data from content string and produce motion flag.
     """
-    if acc_path is None or not os.path.exists(acc_path):
+    if acc_content is None:
         return None, {"rest_ratio": 100.0, "active_ratio": 0.0}
 
     print("📡 Loading accelerometer data...")
     try:
-        df_acc = pd.read_csv(acc_path, sep=';', engine='python')
+        df_acc = pd.read_csv(StringIO(acc_content), sep=';', engine='python')
     except Exception as e:
         print(f"   ⚠️ Could not load ACC: {e}")
         return None, {"rest_ratio": 100.0, "active_ratio": 0.0}
@@ -315,6 +316,81 @@ def find_events_of_interest(rpeaks, beat_types, severity_map):
     return events
 
 
+def detect_pattern_at_index(idx, rpeaks, beat_types, hr_series, sr, window_sec=10):
+    """
+    Detect rhythm patterns around a specific sample index.
+    Returns pattern info including type, severity, and heart rate.
+    """
+    result = {
+        "pattern": "Normal Sinus Rhythm",
+        "severity": 0,
+        "hr": None,
+        "details": []
+    }
+    
+    if len(rpeaks) == 0 or len(beat_types) == 0:
+        return result
+    
+    # Find R-peaks within window around the index
+    window_samples = window_sec * sr
+    start_idx = max(0, idx - window_samples)
+    end_idx = idx + window_samples
+    
+    # Find beat indices in window
+    beats_in_window = []
+    for i, rp in enumerate(rpeaks):
+        if start_idx <= rp <= end_idx and i < len(beat_types):
+            beats_in_window.append(i)
+    
+    if not beats_in_window:
+        return result
+    
+    # Get beat types in window
+    window_types = [beat_types[i] for i in beats_in_window if i < len(beat_types)]
+    type_str = "".join(window_types)
+    
+    # Count pattern occurrences
+    patterns_found = []
+    
+    # Check for various patterns
+    if "SSS" in type_str:
+        patterns_found.append(("Triplet (Premature x3)", 3))
+    if "SS" in type_str:
+        patterns_found.append(("Couplet (Premature x2)", 3))
+    if "SLSL" in type_str or "SNSN" in type_str:
+        patterns_found.append(("Bigeminy Pattern", 2))
+    if "NNS" in type_str:
+        patterns_found.append(("Trigeminy Pattern", 2))
+    if "SL" in type_str and "SS" not in type_str:
+        patterns_found.append(("Isolated Premature Beat", 1))
+    
+    # Count ectopic beats
+    s_count = type_str.count("S")
+    total_beats = len(type_str)
+    ectopic_pct = (s_count / total_beats * 100) if total_beats > 0 else 0
+    
+    if patterns_found:
+        # Get highest severity pattern
+        patterns_found.sort(key=lambda x: x[1], reverse=True)
+        result["pattern"] = patterns_found[0][0]
+        result["severity"] = patterns_found[0][1]
+        result["details"] = [p[0] for p in patterns_found]
+    elif ectopic_pct > 10:
+        result["pattern"] = "Frequent Ectopy"
+        result["severity"] = 2
+    elif s_count > 0:
+        result["pattern"] = "Occasional Ectopy"
+        result["severity"] = 1
+    
+    # Get heart rate at this point
+    if hr_series is not None and idx < len(hr_series):
+        hr_window = hr_series[max(0, idx-sr):min(len(hr_series), idx+sr)]
+        if len(hr_window) > 0:
+            result["hr"] = int(hr_window.mean())
+    
+    return result
+
+
 # ==========================================
 # 4. PLOTTING & REPORTS
 # ==========================================
@@ -360,6 +436,58 @@ def create_ecg_plot(segment, sr, title, filename, color_hex="#8D0A1E"):
     plt.close()
 
 
+def create_ecg_plot_base64(segment, sr, title, color_hex="#8D0A1E"):
+    """
+    Create an ECG plot and return it as base64 string (in-memory, no file I/O).
+    """
+    if len(segment) == 0: 
+        return ""
+    
+    fig, axes = plt.subplots(3, 1, figsize=(18, 8), sharex=False, sharey=True)
+    fig.suptitle(title, fontsize=16, color=color_hex, weight="bold")
+    
+    # Grid config
+    major_ticks = np.arange(0, 10.1, 0.2)
+    minor_ticks = np.arange(0, 10.1, 0.04)
+    
+    strip_seconds = 10
+    samples_per_strip = int(sr * strip_seconds)
+    
+    for i in range(3):
+        ax = axes[i]
+        start = i * samples_per_strip
+        end = start + samples_per_strip
+        if start >= len(segment): 
+            break
+        
+        data = segment[start:min(end, len(segment))]
+        t = np.linspace(0, len(data)/sr, len(data))
+        
+        ax.plot(t, data, color="black", linewidth=1.0)
+        
+        # Medical Grid
+        ax.set_xlim(0, 10)
+        ax.set_xticks(major_ticks)
+        ax.set_xticks(minor_ticks, minor=True)
+        ax.grid(which="major", linestyle="-", linewidth=0.8, color="red", alpha=0.5)
+        ax.grid(which="minor", linestyle=":", linewidth=0.5, color="red", alpha=0.3)
+        
+        ax.set_ylabel(f"Strip {i+1}")
+        if i < 2: 
+            ax.set_xticklabels([])
+        
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    # Save to BytesIO instead of file
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches="tight")
+    plt.close()
+    buf.seek(0)
+    b64 = base64.b64encode(buf.read()).decode("utf-8")
+    buf.close()
+    return b64
+
+
 def check_signal_quality(segment):
     # Simple heuristic: range too small (flatline) or too huge (artifact)
     r = np.max(segment) - np.min(segment)
@@ -371,9 +499,11 @@ def check_signal_quality(segment):
 # ==========================================
 # 5. MAIN PROCESSING FUNCTION
 # ==========================================
-def process_ecg_data(ecg_file, marker_file=None, acc_file=None, output_dir="reports", report_id="report"):
+def process_ecg_data(ecg_content, marker_content=None, acc_content=None, report_id="report"):
     """
     Main processing function that returns a result dict with report data.
+    Works with file content strings instead of file paths.
+    Returns structured data for database storage including marker patterns.
     """
     result = {
         "success": False,
@@ -382,18 +512,21 @@ def process_ecg_data(ecg_file, marker_file=None, acc_file=None, output_dir="repo
         "duration_min": 0,
         "mean_hr": 0,
         "max_hr": 0,
-        "ectopic_burden": 0
+        "min_hr": 0,
+        "ectopic_burden": 0,
+        "sdnn": 0,
+        "pnn50": 0,
+        "sampling_rate": 0,
+        "sample_count": 0,
+        "report_html": None,
+        "baseline_plot_base64": None,
+        "motion_stats": {"rest_ratio": 100.0, "active_ratio": 0.0},
+        "markers": []  # List of marker data with patterns
     }
-    
-    # Create temp directory for images
-    temp_img_dir = Path(output_dir) / f"{report_id}_images"
-    if temp_img_dir.exists():
-        shutil.rmtree(temp_img_dir)
-    temp_img_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1. Load
-        _, ecg_raw, sr, start_time = load_and_sync_data(ecg_file, marker_file)
+        # 1. Load from content strings
+        _, ecg_raw, sr, start_time = load_and_sync_data(ecg_content, marker_content)
         if ecg_raw is None:
             result["error"] = "Failed to load ECG data"
             return result
@@ -407,8 +540,8 @@ def process_ecg_data(ecg_file, marker_file=None, acc_file=None, output_dir="repo
         rpeaks = info["ECG_R_Peaks"]
         ecg_clean = signals["ECG_Clean"].values
 
-        # 3. Motion Gating
-        motion_flag, motion_stats = load_acc_motion(acc_file, start_time, sr, len(ecg_clean))
+        # 3. Motion Gating (using content string now)
+        motion_flag, motion_stats = load_acc_motion(acc_content, start_time, sr, len(ecg_clean))
 
         # 4. Rhythm & Events
         rr_ints, beat_types, global_burden, ectopic_mask = analyze_rhythm(rpeaks, sr)
@@ -456,12 +589,22 @@ def process_ecg_data(ecg_file, marker_file=None, acc_file=None, output_dir="repo
         
         result["mean_hr"] = global_stats["mean_hr"]
         result["max_hr"] = global_stats["max_hr"]
+        result["min_hr"] = global_stats["min_hr"]
+        result["sdnn"] = global_stats["sdnn"]
+        result["pnn50"] = global_stats["pnn50"]
+        result["sampling_rate"] = sr
+        result["sample_count"] = len(ecg_raw)
+        result["motion_stats"] = motion_stats
         
-        # 7. Process Markers
+        # Get heart rate series for marker pattern detection
+        hr_series = signals["ECG_Rate"].astype(float) if "ECG_Rate" in signals else None
+        
+        # 7. Process Markers with Pattern Detection
         markers_html = ""
-        df_markers = load_markers(marker_file, start_time, sr)
+        processed_markers = []
+        df_markers = load_markers(marker_content, start_time, sr)
         if df_markers is not None and not df_markers.empty:
-            print(f"   📍 Generating {len(df_markers)} marker plots...")
+            print(f"   📍 Generating {len(df_markers)} marker plots with pattern detection...")
             t_col = [c for c in df_markers.columns if "phone" in c.lower()]
             if t_col:
                 t_col = t_col[0]
@@ -486,18 +629,50 @@ def process_ecg_data(ecg_file, marker_file=None, acc_file=None, output_dir="repo
                             e_idx = min(len(ecg_clean), idx + 15 * sr)
                             seg = ecg_clean[s_idx:e_idx]
                             
-                            fn = str(temp_img_dir / f"Marker_{i}.png")
-                            label_text = str(row[l_col])
-                            create_ecg_plot(seg, sr, f"SYMPTOM MARKER: {label_text}", fn, "#673AB7")
+                            # Detect pattern around this marker (now includes beat_markers for cursors)
+                            pattern_info = detect_pattern_at_index(idx, rpeaks, beat_types, hr_series, sr)
                             
-                            with open(fn, "rb") as f: 
-                                b64 = base64.b64encode(f.read()).decode("utf-8")
+                            label_text = str(row[l_col])
+                            
+                            # Generate plot with pattern info in title
+                            plot_title = f"SYMPTOM MARKER: {label_text}"
+                            if pattern_info["pattern"] != "Normal Sinus Rhythm":
+                                plot_title += f" | {pattern_info['pattern']}"
+                            
+                            b64 = create_ecg_plot_base64(seg, sr, plot_title, "#673AB7")
+                            
+                            # Store marker data for database
+                            marker_data = {
+                                "marker_time": m_time_naive.isoformat(),
+                                "marker_label": label_text,
+                                "sample_index": idx,
+                                "detected_pattern": pattern_info["pattern"],
+                                "pattern_severity": pattern_info["severity"],
+                                "hr_at_marker": pattern_info["hr"],
+                                "ecg_plot_base64": b64
+                            }
+                            processed_markers.append(marker_data)
+                            
+                            # Generate HTML with pattern info
+                            severity_colors = {0: "#4CAF50", 1: "#FFC107", 2: "#FF9800", 3: "#F44336"}
+                            severity_labels = {0: "Normal", 1: "Mild", 2: "Moderate", 3: "Significant"}
+                            sev_color = severity_colors.get(pattern_info["severity"], "#673AB7")
+                            sev_label = severity_labels.get(pattern_info["severity"], "Unknown")
                             
                             markers_html += f"""
                             <div class='event-box' style='border-left: 5px solid #673AB7;'>
                                 <div class='event-header' style='background: #f3e5f5;'>
                                     <h3 style='color: #673AB7;'>📍 Symptom: {label_text}</h3>
                                     <p>Time: {m_time_naive.strftime('%H:%M:%S')}</p>
+                                    <div style='margin-top: 10px; padding: 8px; background: white; border-radius: 6px;'>
+                                        <p style='margin: 0;'><strong>🔍 Detected Pattern:</strong> 
+                                            <span style='color: {sev_color}; font-weight: bold;'>{pattern_info["pattern"]}</span>
+                                        </p>
+                                        <p style='margin: 5px 0 0 0; font-size: 0.9rem; color: #666;'>
+                                            Severity: <span style='color: {sev_color};'>{sev_label}</span>
+                                            {f" | HR: {pattern_info['hr']} bpm" if pattern_info['hr'] else ""}
+                                        </p>
+                                    </div>
                                 </div>
                                 <div class='plot-container' style='margin: 0; border: none;'>
                                     <img src='data:image/png;base64,{b64}' alt='Marker Plot'>
@@ -506,12 +681,14 @@ def process_ecg_data(ecg_file, marker_file=None, acc_file=None, output_dir="repo
                             """
                     except Exception as e:
                         print(f"   ⚠️ Error processing marker {i}: {e}")
-
-        # 8. Generate Visuals
         
-        # Baseline Plot
-        baseline_img = str(temp_img_dir / "Baseline.png")
-        create_ecg_plot(baseline_seg, sr, "BASELINE (Cleanest Resting Segment)", baseline_img, "#2E7D32")
+        result["markers"] = processed_markers
+
+        # 8. Generate Visuals (all in-memory now)
+        
+        # Baseline Plot - generate to base64 directly
+        b64_base = create_ecg_plot_base64(baseline_seg, sr, "BASELINE (Cleanest Resting Segment)", "#2E7D32")
+        result["baseline_plot_base64"] = b64_base
         
         # Events Plot (Top 5)
         events_html = ""
@@ -532,12 +709,11 @@ def process_ecg_data(ecg_file, marker_file=None, acc_file=None, output_dir="repo
             if check_signal_quality(seg):
                 unique_events.append(e)
                 seen_times.append(c)
-                fn = str(temp_img_dir / f"Event_{len(unique_events)}.png")
                 time_str = (start_time + timedelta(seconds=c/sr)).strftime("%H:%M:%S")
-                create_ecg_plot(seg, sr, f"{e['type']} @ {time_str}", fn)
                 
-                with open(fn, "rb") as f: 
-                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                # Generate plot to base64 directly
+                b64 = create_ecg_plot_base64(seg, sr, f"{e['type']} @ {time_str}")
+                
                 events_html += f"""
                 <div class='event-box'>
                     <div class='event-header'>
@@ -563,10 +739,7 @@ def process_ecg_data(ecg_file, marker_file=None, acc_file=None, output_dir="repo
         else:
             pattern_rows = "<tr><td colspan='2' style='text-align:center; color:#999; font-size: 0.85rem; padding-top: 10px;'>No specific patterns detected</td></tr>"
 
-        # 9. Responsive HTML Generation
-        with open(baseline_img, "rb") as f: 
-            b64_base = base64.b64encode(f.read()).decode("utf-8")
-        
+        # 9. Responsive HTML Generation (no file I/O)
         html = generate_report_html(
             start_time=start_time,
             ecg_clean=ecg_clean,
@@ -581,13 +754,9 @@ def process_ecg_data(ecg_file, marker_file=None, acc_file=None, output_dir="repo
             pattern_rows=pattern_rows
         )
         
-        report_fn = Path(output_dir) / f"{report_id}.html"
-        with open(report_fn, "w") as f: 
-            f.write(html)
-        print(f"\n✅ Report generated: {report_fn}")
-        
-        # Clean up temp images
-        shutil.rmtree(temp_img_dir)
+        # Return HTML in result instead of saving to file
+        result["report_html"] = html
+        print(f"\n✅ Report generated for {report_id}")
         
         result["success"] = True
         return result
@@ -809,12 +978,3 @@ def generate_report_html(start_time, ecg_clean, sr, global_stats, global_burden,
     </body>
     </html>
     """
-
-
-def get_report_html(report_id, output_dir="reports"):
-    """Load and return report HTML content."""
-    report_path = Path(output_dir) / f"{report_id}.html"
-    if report_path.exists():
-        with open(report_path, "r") as f:
-            return f.read()
-    return None

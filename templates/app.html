@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Heart Diary - Calendar</title>
+    <title>Heart Diary - {{ page_title | default('Polar H10 ECG Analysis') }}</title>
     <style>
         :root {
             --primary-color: #8D0A1E;
@@ -71,6 +71,10 @@
             padding: 0 1rem;
         }
         
+        .container.narrow {
+            max-width: 800px;
+        }
+        
         .card {
             background: var(--card-bg);
             border-radius: 12px;
@@ -86,6 +90,163 @@
             display: flex;
             align-items: center;
             gap: 0.5rem;
+        }
+        
+        /* Upload Form Styles */
+        .upload-form {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .form-group label {
+            font-weight: 600;
+            color: var(--text-color);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .form-group label .required {
+            color: var(--primary-color);
+        }
+        
+        .form-group label .optional {
+            font-weight: 400;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        
+        .file-input-wrapper {
+            position: relative;
+            border: 2px dashed var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            text-align: center;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        
+        .file-input-wrapper:hover {
+            border-color: var(--primary-color);
+            background: #fef5f5;
+        }
+        
+        .file-input-wrapper.has-file {
+            border-color: var(--success-color);
+            background: #e8f5e9;
+        }
+        
+        .file-input-wrapper input[type="file"] {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            cursor: pointer;
+        }
+        
+        .file-input-wrapper .icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .file-input-wrapper .text {
+            color: var(--text-muted);
+        }
+        
+        .file-input-wrapper .filename {
+            color: var(--success-color);
+            font-weight: 600;
+            margin-top: 0.5rem;
+        }
+        
+        textarea {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 1rem;
+            resize: vertical;
+            min-height: 80px;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(141, 10, 30, 0.1);
+        }
+        
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.875rem 2rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-decoration: none;
+        }
+        
+        .btn-primary {
+            background: var(--primary-color);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: var(--primary-light);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(141, 10, 30, 0.3);
+        }
+        
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .btn-danger {
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+            padding: 0.5rem 1rem;
+        }
+        
+        .btn-danger:hover {
+            background: #ffcdd2;
+        }
+        
+        .info-box {
+            background: #e3f2fd;
+            border-left: 4px solid var(--info-color);
+            padding: 1rem;
+            border-radius: 0 8px 8px 0;
+            margin-bottom: 1.5rem;
+        }
+        
+        .info-box h3 {
+            color: var(--info-color);
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .info-box ul {
+            margin-left: 1.5rem;
+            color: var(--text-muted);
+            font-size: 0.9rem;
         }
         
         /* Calendar Styles */
@@ -259,40 +420,6 @@
             gap: 0.5rem;
         }
         
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 0.25rem;
-            padding: 0.5rem 1rem;
-            border: none;
-            border-radius: 6px;
-            font-size: 0.9rem;
-            font-weight: 500;
-            cursor: pointer;
-            text-decoration: none;
-            transition: all 0.2s;
-        }
-        
-        .btn-primary {
-            background: var(--primary-color);
-            color: white;
-        }
-        
-        .btn-primary:hover {
-            background: var(--primary-light);
-        }
-        
-        .btn-danger {
-            background: #ffebee;
-            color: #c62828;
-            border: 1px solid #ffcdd2;
-        }
-        
-        .btn-danger:hover {
-            background: #ffcdd2;
-        }
-        
         .empty-state {
             text-align: center;
             padding: 3rem;
@@ -308,6 +435,84 @@
             margin-bottom: 1rem;
         }
         
+        /* Loading Overlay */
+        .loading-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255,255,255,0.9);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .loading-overlay.active {
+            display: flex;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid var(--border-color);
+            border-top-color: var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .loading-overlay p {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+        
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 0;
+        }
+        
+        .tab-btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.2s;
+        }
+        
+        .tab-btn:hover {
+            color: var(--primary-color);
+        }
+        
+        .tab-btn.active {
+            color: var(--primary-color);
+            border-bottom-color: var(--primary-color);
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        /* Responsive */
         @media (max-width: 768px) {
             .navbar {
                 flex-direction: column;
@@ -352,6 +557,14 @@
                 width: 100%;
                 justify-content: flex-end;
             }
+            
+            .container {
+                margin: 1rem auto;
+            }
+            
+            .card {
+                padding: 1.5rem;
+            }
         }
     </style>
 </head>
@@ -359,12 +572,76 @@
     <div class="navbar">
         <h1>❤️ Heart Diary</h1>
         <nav>
-            <a href="/">Upload</a>
-            <a href="/calendar" class="active">Calendar</a>
+            <a href="/" class="{{ 'active' if active_tab == 'upload' else '' }}">Upload</a>
+            <a href="/calendar" class="{{ 'active' if active_tab == 'calendar' else '' }}">Calendar</a>
         </nav>
     </div>
     
-    <div class="container">
+    <div class="container {{ 'narrow' if active_tab == 'upload' else '' }}">
+        {% if active_tab == 'upload' %}
+        <!-- Upload Tab -->
+        <div class="card">
+            <h2>📤 Upload ECG Data</h2>
+            
+            <div class="info-box">
+                <h3>ℹ️ Supported Files</h3>
+                <ul>
+                    <li><strong>ECG Log</strong> - Polar H10 ECG export (.txt/.csv) - Required</li>
+                    <li><strong>Accelerometer Log</strong> - Motion data for activity detection - Optional</li>
+                    <li><strong>Marker Log</strong> - Symptom markers with timestamps - Optional</li>
+                </ul>
+            </div>
+            
+            <form class="upload-form" action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
+                <div class="form-group">
+                    <label>
+                        📈 ECG Log <span class="required">*</span>
+                    </label>
+                    <div class="file-input-wrapper" id="ecgWrapper">
+                        <div class="icon">📄</div>
+                        <div class="text">Click or drag to upload ECG file</div>
+                        <div class="filename" id="ecgFilename"></div>
+                        <input type="file" name="ecg_file" id="ecgFile" accept=".txt,.csv" required>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        🏃 Accelerometer Log <span class="optional">(Optional)</span>
+                    </label>
+                    <div class="file-input-wrapper" id="accWrapper">
+                        <div class="icon">📄</div>
+                        <div class="text">Click or drag to upload ACC file</div>
+                        <div class="filename" id="accFilename"></div>
+                        <input type="file" name="acc_file" id="accFile" accept=".txt,.csv">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        📍 Marker Log <span class="optional">(Optional)</span>
+                    </label>
+                    <div class="file-input-wrapper" id="markerWrapper">
+                        <div class="icon">📄</div>
+                        <div class="text">Click or drag to upload Marker file</div>
+                        <div class="filename" id="markerFilename"></div>
+                        <input type="file" name="marker_file" id="markerFile" accept=".txt,.csv">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>📝 Notes <span class="optional">(Optional)</span></label>
+                    <textarea name="notes" placeholder="Add any notes about this recording session..."></textarea>
+                </div>
+                
+                <button type="submit" class="btn btn-primary" id="submitBtn">
+                    🔬 Analyze ECG Data
+                </button>
+            </form>
+        </div>
+        
+        {% elif active_tab == 'calendar' %}
+        <!-- Calendar Tab -->
         <div class="card">
             <h2>📅 ECG History</h2>
             
@@ -391,9 +668,52 @@
                 <!-- Reports will be populated by JS -->
             </div>
         </div>
+        {% endif %}
+    </div>
+    
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <p>Processing ECG data... This may take a moment.</p>
     </div>
     
     <script>
+        {% if active_tab == 'upload' %}
+        // File input handlers
+        function setupFileInput(inputId, wrapperId, filenameId) {
+            const input = document.getElementById(inputId);
+            const wrapper = document.getElementById(wrapperId);
+            const filename = document.getElementById(filenameId);
+            
+            input.addEventListener('change', function() {
+                if (this.files.length > 0) {
+                    wrapper.classList.add('has-file');
+                    filename.textContent = this.files[0].name;
+                } else {
+                    wrapper.classList.remove('has-file');
+                    filename.textContent = '';
+                }
+            });
+        }
+        
+        setupFileInput('ecgFile', 'ecgWrapper', 'ecgFilename');
+        setupFileInput('accFile', 'accWrapper', 'accFilename');
+        setupFileInput('markerFile', 'markerWrapper', 'markerFilename');
+        
+        // Form submission
+        document.getElementById('uploadForm').addEventListener('submit', function(e) {
+            const ecgFile = document.getElementById('ecgFile');
+            if (!ecgFile.files.length) {
+                e.preventDefault();
+                alert('Please select an ECG file');
+                return;
+            }
+            
+            document.getElementById('loadingOverlay').classList.add('active');
+            document.getElementById('submitBtn').disabled = true;
+        });
+        {% endif %}
+        
+        {% if active_tab == 'calendar' %}
         const reportsByDate = {{ reports_by_date | safe }};
         const allReports = {{ reports | tojson | safe }};
         
@@ -557,6 +877,7 @@
         // Initialize
         renderCalendar();
         renderReportsList();
+        {% endif %}
     </script>
 </body>
 </html>
