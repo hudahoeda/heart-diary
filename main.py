@@ -180,6 +180,12 @@ def save_report_to_db(report_data: dict, ecg_content: str, acc_content: str = No
         db.close()
 
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for container orchestration (no auth required)."""
+    return {"status": "healthy"}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request, username: str = Depends(verify_credentials)):
     """Home page with upload form."""
